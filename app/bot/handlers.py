@@ -5,6 +5,7 @@ from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
 from sqlalchemy import select, func
+from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.database import async_session
@@ -26,6 +27,13 @@ router = Router()
 
 PAGE_SIZE = 5
 
+_scheduler = None
+
+
+def set_scheduler(scheduler):
+    global _scheduler
+    _scheduler = scheduler
+
 
 def admin_only(fn):
     @functools.wraps(fn)
@@ -37,13 +45,19 @@ def admin_only(fn):
     return wrapper
 
 
+def _company_name(vacancy) -> str:
+    if vacancy.company and vacancy.company.name:
+        return vacancy.company.name
+    return ""
+
+
 # ══════════════════════════════════════════════════════════════
-#  КОМАНДЫ
+#  КОМАНДЫ И КНОПКИ МЕНЮ
 # ══════════════════════════════════════════════════════════════
 
 @router.message(Command("start"))
 @admin_only
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, **kw):
     await message.answer(
         "👋 <b>Job Hunter Bot</b>\n\n"
         "Автоматический поиск вакансий аналитика\n"
@@ -53,13 +67,10 @@ async def cmd_start(message: Message):
     )
 
 
-# ══════════════════════════════════════════════════════════════
-#  КНОПКИ ГЛАВНОГО МЕНЮ
-# ══════════════════════════════════════════════════════════════
-
 @router.message(F.text == "📊 Статистика")
+@router.message(Command("stats"))
 @admin_only
-async def btn_stats(message: Message):
+async def btn_stats(message: Message, **kw):
     async with async_session() as session:
         total = await session.scalar(select(func.count(Vacancy.id))) or 0
         new = await session.scalar(
@@ -70,9 +81,6 @@ async def btn_stats(message: Message):
         ) or 0
         approved = await session.scalar(
             select(func.count(Vacancy.id)).where(Vacancy.status == VacancyStatus.APPROVED)
-        ) or 0
-        applied_v = await session.scalar(
-            select(func.count(Vacancy.id)).where(Vacancy.status == VacancyStatus.APPLIED)
         ) or 0
         applied = await session.scalar(
             select(func.count(Application.id)).where(Application.status == ApplicationStatus.SENT)
@@ -98,20 +106,22 @@ async def btn_stats(message: Message):
 
 
 @router.message(F.text == "🔍 Вакансии")
+@router.message(Command("vacancies"))
 @admin_only
-async def btn_vacancies(message: Message):
+async def btn_vacancies(message: Message, **kw):
     await _send_vacancy_page(message, page=0)
 
 
 @router.message(F.text == "⭐ Топ вакансии")
 @admin_only
-async def btn_top(message: Message):
+async def btn_top(message: Message, **kw):
     await _send_vacancy_page(message, page=0, top_only=True)
 
 
 @router.message(F.text == "📩 Сообщения")
+@router.message(Command("messages"))
 @admin_only
-async def btn_messages(message: Message):
+async def btn_messages(message: Message, **kw):
     async with async_session() as session:
         result = await session.execute(
             select(RecruiterMessage)
@@ -137,22 +147,28 @@ async def btn_messages(message: Message):
 
 
 @router.message(F.text == "⚙️ Настройки")
+@router.message(Command("settings"))
 @admin_only
-async def btn_settings(message: Message):
+async def btn_settings(message: Message, **kw):
+    paused = _scheduler.is_paused if _scheduler else False
+    auto = _scheduler.auto_apply if _scheduler else False
     await message.answer(
         "⚙️ <b>Настройки</b>\n\n"
         f"📍 Позиция: {settings.desired_position}\n"
         f"💰 Зарплата: {settings.desired_salary_min:,}–{settings.desired_salary_max:,}\n"
         f"⏱ Интервал: {settings.check_interval_sec // 60} мин\n"
-        f"🎯 Макс. откликов/день: {settings.max_applies_per_day}",
+        f"🎯 Макс. откликов/день: {settings.max_applies_per_day}\n"
+        f"{'⏸ Пауза' if paused else '▶️ Работает'} | "
+        f"{'🟢 Авто-отклик' if auto else '⚪ Авто-отклик выкл'}",
         parse_mode="HTML",
-        reply_markup=settings_keyboard(),
+        reply_markup=settings_keyboard(paused, auto),
     )
 
 
 @router.message(F.text == "📋 Логи")
+@router.message(Command("logs"))
 @admin_only
-async def btn_logs(message: Message):
+async def btn_logs(message: Message, **kw):
     async with async_session() as session:
         result = await session.execute(
             select(Application)
@@ -176,37 +192,9 @@ async def btn_logs(message: Message):
     )
 
 
-# ══════════════════════════════════════════════════════════════
-#  СТАРЫЕ КОМАНДЫ (тоже работают)
-# ══════════════════════════════════════════════════════════════
-
-@router.message(Command("stats"))
-@admin_only
-async def cmd_stats(message: Message):
-    await btn_stats(message)
-
-
-@router.message(Command("vacancies"))
-@admin_only
-async def cmd_vacancies(message: Message):
-    await btn_vacancies(message)
-
-
-@router.message(Command("messages"))
-@admin_only
-async def cmd_messages(message: Message):
-    await btn_messages(message)
-
-
-@router.message(Command("settings"))
-@admin_only
-async def cmd_settings(message: Message):
-    await btn_settings(message)
-
-
 @router.message(Command("blacklist"))
 @admin_only
-async def cmd_blacklist(message: Message):
+async def cmd_blacklist(message: Message, **kw):
     args = message.text.split(maxsplit=2)
     if len(args) < 2:
         async with async_session() as session:
@@ -231,35 +219,48 @@ async def cmd_blacklist(message: Message):
     await message.answer(f"✅ Добавлено в ЧС: [{entry_type}] {value}")
 
 
+@router.message(Command("pause"))
+@admin_only
+async def cmd_pause(message: Message, **kw):
+    if _scheduler:
+        _scheduler.pause()
+    await message.answer("⏸ Пауза. /resume — возобновить", reply_markup=main_menu())
+
+
+@router.message(Command("resume"))
+@admin_only
+async def cmd_resume(message: Message, **kw):
+    if _scheduler:
+        _scheduler.resume()
+    await message.answer("▶️ Возобновлено", reply_markup=main_menu())
+
+
 # ══════════════════════════════════════════════════════════════
 #  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ══════════════════════════════════════════════════════════════
 
 async def _send_vacancy_page(target, page: int = 0, top_only: bool = False):
     async with async_session() as session:
-        query = select(Vacancy).where(
-            Vacancy.status.in_([VacancyStatus.NEW, VacancyStatus.ANALYZED, VacancyStatus.APPROVED])
+        base_filter = Vacancy.status.in_([VacancyStatus.NEW, VacancyStatus.ANALYZED, VacancyStatus.APPROVED])
+
+        count_q = select(func.count(Vacancy.id)).where(base_filter)
+        if top_only:
+            count_q = count_q.where(Vacancy.ai_score >= 60)
+        total = await session.scalar(count_q) or 0
+
+        total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+        page = min(page, total_pages - 1)
+
+        query = (
+            select(Vacancy)
+            .options(selectinload(Vacancy.company))
+            .where(base_filter)
         )
         if top_only:
             query = query.where(Vacancy.ai_score >= 60)
 
         query = query.order_by(Vacancy.ai_score.desc().nullslast(), Vacancy.created_at.desc())
-
-        total = await session.scalar(
-            select(func.count(Vacancy.id)).where(
-                Vacancy.status.in_([VacancyStatus.NEW, VacancyStatus.ANALYZED, VacancyStatus.APPROVED])
-            ).where(Vacancy.ai_score >= 60) if top_only else
-            select(func.count(Vacancy.id)).where(
-                Vacancy.status.in_([VacancyStatus.NEW, VacancyStatus.ANALYZED, VacancyStatus.APPROVED])
-            )
-        ) or 0
-
-        total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
-        page = min(page, total_pages - 1)
-
-        result = await session.execute(
-            query.offset(page * PAGE_SIZE).limit(PAGE_SIZE)
-        )
+        result = await session.execute(query.offset(page * PAGE_SIZE).limit(PAGE_SIZE))
         vacancies = result.scalars().all()
 
     if not vacancies:
@@ -286,17 +287,18 @@ async def _send_vacancy_page(target, page: int = 0, top_only: bool = False):
 
         score = f" | 🤖 {v.ai_score:.0f}" if v.ai_score else ""
         remote = " 🏠" if v.is_remote else ""
-        company = f"\n   🏢 {v.company_name}" if v.company_name else ""
+        cname = _company_name(v)
+        company = f"\n   🏢 {cname}" if cname else ""
 
         lines.append(
             f"<b>{num}. {v.title}</b>{remote}{company}"
             f"\n   📍 {v.location or '—'}{salary}{score}"
-            f"\n   🔗 <a href='{v.url}'>Открыть на hh.ru</a>"
+            f"\n   🔗 <a href='{v.url}'>Открыть</a>"
         )
         ids.append(v.id)
 
     header = "⭐ <b>Топ вакансии</b>" if top_only else "🔍 <b>Вакансии</b>"
-    prefix = "top:" if top_only else ""
+    prefix = "top_" if top_only else ""
     text = f"{header} ({total} шт.)\n\n" + "\n\n".join(lines)
     kb = vacancy_list_keyboard(ids, page, total_pages, prefix)
 
@@ -313,26 +315,26 @@ async def _send_vacancy_page(target, page: int = 0, top_only: bool = False):
 
 @router.callback_query(F.data.startswith("page:"))
 @admin_only
-async def cb_page(callback: CallbackQuery):
+async def cb_page(callback: CallbackQuery, **kw):
     page = int(callback.data.split(":")[1])
     await _send_vacancy_page(callback, page=page)
 
 
 @router.callback_query(F.data.startswith("top_page:"))
 @admin_only
-async def cb_top_page(callback: CallbackQuery):
+async def cb_top_page(callback: CallbackQuery, **kw):
     page = int(callback.data.split(":")[1])
     await _send_vacancy_page(callback, page=page, top_only=True)
 
 
 @router.callback_query(F.data == "noop")
-async def cb_noop(callback: CallbackQuery):
+async def cb_noop(callback: CallbackQuery, **kw):
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("apply:"))
 @admin_only
-async def cb_apply(callback: CallbackQuery):
+async def cb_apply(callback: CallbackQuery, **kw):
     vacancy_id = int(callback.data.split(":")[1])
 
     async with async_session() as session:
@@ -340,17 +342,15 @@ async def cb_apply(callback: CallbackQuery):
         if not vacancy:
             await callback.answer("Вакансия не найдена")
             return
+        title = vacancy.title
+        desc = vacancy.description or ""
 
     await callback.answer("🤖 Генерирую письмо...")
 
-    letter, _, _ = await claude_ai.generate_cover_letter(
-        vacancy.title,
-        vacancy.description or "",
-        "",
-    )
+    letter, _, _ = await claude_ai.generate_cover_letter(title, desc, "")
 
     await callback.message.answer(
-        f"✉️ <b>Сопроводительное для:</b>\n{vacancy.title}\n\n{letter}",
+        f"✉️ <b>Сопроводительное для:</b>\n{title}\n\n{letter}",
         parse_mode="HTML",
         reply_markup=confirm_apply_keyboard(vacancy_id),
     )
@@ -358,18 +358,13 @@ async def cb_apply(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("confirm_apply:"))
 @admin_only
-async def cb_confirm_apply(callback: CallbackQuery):
-    vacancy_id = int(callback.data.split(":")[1])
-    await callback.answer("📨 Отправляю отклик...")
-    await callback.message.edit_text(
-        callback.message.text + "\n\n⏳ Отправка...",
-        parse_mode="HTML",
-    )
+async def cb_confirm_apply(callback: CallbackQuery, **kw):
+    await callback.answer("📨 Отправка не поддерживается в API-режиме")
 
 
 @router.callback_query(F.data.startswith("skip:"))
 @admin_only
-async def cb_skip(callback: CallbackQuery):
+async def cb_skip(callback: CallbackQuery, **kw):
     vacancy_id = int(callback.data.split(":")[1])
     async with async_session() as session:
         vacancy = await session.get(Vacancy, vacancy_id)
@@ -381,32 +376,33 @@ async def cb_skip(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("details:"))
 @admin_only
-async def cb_details(callback: CallbackQuery):
+async def cb_details(callback: CallbackQuery, **kw):
     vacancy_id = int(callback.data.split(":")[1])
     async with async_session() as session:
-        vacancy = await session.get(Vacancy, vacancy_id)
+        vacancy = await session.get(Vacancy, vacancy_id, options=[selectinload(Vacancy.company)])
         if not vacancy:
             await callback.answer("Не найдена")
             return
 
-    desc = vacancy.description or "Описание не загружено"
-    if len(desc) > 3000:
-        desc = desc[:3000] + "..."
+        desc = vacancy.description or "Описание не загружено"
+        if len(desc) > 3000:
+            desc = desc[:3000] + "..."
 
-    ai_info = ""
-    if vacancy.ai_score is not None:
-        ai_info = f"\n\n🤖 <b>AI-скор: {vacancy.ai_score:.0f}/100</b>\n{vacancy.ai_reason or '—'}"
+        ai_info = ""
+        if vacancy.ai_score is not None:
+            ai_info = f"\n\n🤖 <b>AI-скор: {vacancy.ai_score:.0f}/100</b>\n{vacancy.ai_reason or '—'}"
 
-    salary = ""
-    if vacancy.salary_from or vacancy.salary_to:
-        parts = []
-        if vacancy.salary_from:
-            parts.append(f"от {vacancy.salary_from:,}")
-        if vacancy.salary_to:
-            parts.append(f"до {vacancy.salary_to:,}")
-        salary = f"\n💰 {' '.join(parts)} {vacancy.salary_currency or ''}"
+        salary = ""
+        if vacancy.salary_from or vacancy.salary_to:
+            parts = []
+            if vacancy.salary_from:
+                parts.append(f"от {vacancy.salary_from:,}")
+            if vacancy.salary_to:
+                parts.append(f"до {vacancy.salary_to:,}")
+            salary = f"\n💰 {' '.join(parts)} {vacancy.salary_currency or ''}"
 
-    company = f"\n🏢 {vacancy.company_name}" if vacancy.company_name else ""
+        cname = _company_name(vacancy)
+        company = f"\n🏢 {cname}" if cname else ""
 
     await callback.message.answer(
         f"<b>{vacancy.title}</b>{company}{salary}{ai_info}\n\n"
@@ -421,7 +417,7 @@ async def cb_details(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("blacklist:"))
 @admin_only
-async def cb_blacklist(callback: CallbackQuery):
+async def cb_blacklist(callback: CallbackQuery, **kw):
     vacancy_id = int(callback.data.split(":")[1])
     async with async_session() as session:
         vacancy = await session.get(Vacancy, vacancy_id)
@@ -434,16 +430,17 @@ async def cb_blacklist(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("ai_reply:"))
 @admin_only
-async def cb_ai_reply(callback: CallbackQuery):
+async def cb_ai_reply(callback: CallbackQuery, **kw):
     msg_id = int(callback.data.split(":")[1])
     async with async_session() as session:
         msg = await session.get(RecruiterMessage, msg_id)
         if not msg:
             await callback.answer("Не найдено")
             return
+        msg_text = msg.text
 
     await callback.answer("🤖 Генерирую ответ...")
-    reply, _, _ = await claude_ai.generate_reply(msg.text)
+    reply, _, _ = await claude_ai.generate_reply(msg_text)
 
     async with async_session() as session:
         msg = await session.get(RecruiterMessage, msg_id)
@@ -451,15 +448,12 @@ async def cb_ai_reply(callback: CallbackQuery):
             msg.ai_suggested_reply = reply
             await session.commit()
 
-    await callback.message.answer(
-        f"🤖 <b>AI-ответ:</b>\n\n{reply}",
-        parse_mode="HTML",
-    )
+    await callback.message.answer(f"🤖 <b>AI-ответ:</b>\n\n{reply}", parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("mark_read:"))
 @admin_only
-async def cb_mark_read(callback: CallbackQuery):
+async def cb_mark_read(callback: CallbackQuery, **kw):
     msg_id = int(callback.data.split(":")[1])
     async with async_session() as session:
         msg = await session.get(RecruiterMessage, msg_id)
@@ -472,19 +466,38 @@ async def cb_mark_read(callback: CallbackQuery):
 
 @router.callback_query(F.data == "toggle_pause")
 @admin_only
-async def cb_toggle_pause(callback: CallbackQuery):
-    await callback.answer("Используй /pause или /resume")
+async def cb_toggle_pause(callback: CallbackQuery, **kw):
+    if not _scheduler:
+        await callback.answer("Scheduler не найден")
+        return
+    if _scheduler.is_paused:
+        _scheduler.resume()
+        await callback.answer("▶️ Возобновлено")
+    else:
+        _scheduler.pause()
+        await callback.answer("⏸ На паузе")
+    await callback.message.edit_reply_markup(
+        reply_markup=settings_keyboard(_scheduler.is_paused, _scheduler.auto_apply)
+    )
 
 
 @router.callback_query(F.data == "toggle_auto")
 @admin_only
-async def cb_toggle_auto(callback: CallbackQuery):
-    await callback.answer("Авто-отклик переключён")
+async def cb_toggle_auto(callback: CallbackQuery, **kw):
+    if not _scheduler:
+        await callback.answer("Scheduler не найден")
+        return
+    _scheduler.auto_apply = not _scheduler.auto_apply
+    status = "🟢 ВКЛ" if _scheduler.auto_apply else "⚪ ВЫКЛ"
+    await callback.answer(f"Авто-отклик: {status}")
+    await callback.message.edit_reply_markup(
+        reply_markup=settings_keyboard(_scheduler.is_paused, _scheduler.auto_apply)
+    )
 
 
 @router.callback_query(F.data == "force_search")
 @admin_only
-async def cb_force_search(callback: CallbackQuery):
+async def cb_force_search(callback: CallbackQuery, **kw):
     await callback.answer("🔄 Запускаю поиск...")
     from app.workers.vacancy_worker import run_vacancy_search
     count = await run_vacancy_search()
@@ -493,25 +506,6 @@ async def cb_force_search(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("cancel_apply:"))
 @admin_only
-async def cb_cancel_apply(callback: CallbackQuery):
+async def cb_cancel_apply(callback: CallbackQuery, **kw):
     await callback.answer("Отменено")
     await callback.message.delete()
-
-
-# Поддержка старых команд
-@router.message(Command("pause"))
-@admin_only
-async def cmd_pause(message: Message):
-    await message.answer("⏸ Пауза. /resume — возобновить", reply_markup=main_menu())
-
-
-@router.message(Command("resume"))
-@admin_only
-async def cmd_resume(message: Message):
-    await message.answer("▶️ Возобновлено", reply_markup=main_menu())
-
-
-@router.message(Command("logs"))
-@admin_only
-async def cmd_logs(message: Message):
-    await btn_logs(message)

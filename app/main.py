@@ -7,7 +7,7 @@ from aiogram.enums import ParseMode
 from app.config import settings
 from app.database import engine
 from app.models.base import Base
-from app.bot.handlers import router
+from app.bot.handlers import router, set_scheduler
 from app.workers.scheduler import WorkerScheduler
 
 log = structlog.get_logger()
@@ -68,6 +68,7 @@ async def main():
     scheduler = WorkerScheduler(
         notify_callback=lambda text: notify_telegram(bot, text)
     )
+    set_scheduler(scheduler)
     scheduler.start()
 
     await notify_telegram(
