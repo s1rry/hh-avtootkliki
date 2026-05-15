@@ -1,0 +1,8 @@
+[phases.setup]
+nixPkgs = ["python312", "chromium", "nss", "freetype", "harfbuzz", "ca-certificates", "fontconfig"]
+
+[phases.install]
+cmds = ["pip install -r requirements.txt", "playwright install chromium"]
+
+[start]
+cmd = "python -m app.main"
