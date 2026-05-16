@@ -53,7 +53,6 @@ async def run_vacancy_search():
                     vacancies = await parser.search_vacancies(
                         query,
                         remote=True,
-                        salary_from=settings.desired_salary_min,
                     )
                     saved = await _save_vacancies(vacancies)
                     total_new += saved
