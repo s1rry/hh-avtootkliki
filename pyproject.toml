@@ -33,6 +33,9 @@ dev = [
     "ruff>=0.8.0",
 ]
 
+[tool.setuptools.packages.find]
+where = ["."]
+
 [tool.ruff]
 line-length = 120
 target-version = "py312"
