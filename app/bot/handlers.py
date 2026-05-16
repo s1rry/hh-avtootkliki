@@ -448,7 +448,17 @@ async def cb_confirm_apply(callback: CallbackQuery, **kw):
                 await session.commit()
         await callback.message.answer("✅ Отклик отправлен!")
     else:
-        await callback.message.answer("❌ Не удалось отправить отклик. Проверь логи.")
+        await callback.message.answer("❌ Не удалось отправить отклик")
+        # Send debug screenshot if available
+        from pathlib import Path
+        from aiogram.types import FSInputFile
+        for name in ("debug_apply_fail.png", "debug_apply_timeout.png", "debug_apply_no_btn.png"):
+            p = Path(f"data/{name}")
+            if p.exists():
+                try:
+                    await callback.message.answer_photo(FSInputFile(p), caption=f"🖼 {name}")
+                except Exception:
+                    pass
 
 
 @router.callback_query(F.data.startswith("skip:"))

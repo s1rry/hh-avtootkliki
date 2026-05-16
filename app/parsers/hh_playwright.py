@@ -42,7 +42,7 @@ class HHPlaywright:
 
         # Check if already logged in via saved session (cookies)
         try:
-            await page.goto(HH_BASE, wait_until="domcontentloaded", timeout=20000)
+            await page.goto(HH_BASE, wait_until="domcontentloaded", timeout=45000)
             await page.wait_for_timeout(3000)
 
             # Check for user menu (means logged in)
@@ -72,7 +72,7 @@ class HHPlaywright:
             return False
 
         try:
-            await page.goto(HH_LOGIN_URL, wait_until="domcontentloaded", timeout=20000)
+            await page.goto(HH_LOGIN_URL, wait_until="domcontentloaded", timeout=45000)
             await page.wait_for_timeout(2000)
 
             # Click "Войти с паролем" if available
@@ -157,20 +157,20 @@ class HHPlaywright:
         page = await self._get_page()
 
         try:
-            await page.goto(vacancy_url, wait_until="domcontentloaded", timeout=20000)
-            await random_delay(2, 5)
+            await page.goto(vacancy_url, wait_until="domcontentloaded", timeout=45000)
+            await random_delay(2, 4)
 
             # Find "Откликнуться" button
             apply_btn = await page.query_selector('[data-qa="vacancy-response-link-top"]')
             if not apply_btn:
                 apply_btn = await page.query_selector('[data-qa="vacancy-response-link-bottom"]')
             if not apply_btn:
-                # Maybe already applied
                 applied_el = await page.query_selector('[data-qa="vacancy-response-link-view-topic"]')
                 if applied_el:
                     log.info("hh_already_applied", url=vacancy_url)
                     return True
-                log.warning("hh_apply_btn_not_found", url=vacancy_url)
+                await self._save_debug_screenshot(page, "apply_no_btn")
+                log.warning("hh_apply_btn_not_found", url=vacancy_url, page_url=page.url)
                 return False
 
             await apply_btn.click()
@@ -190,7 +190,6 @@ class HHPlaywright:
             if resume_select:
                 await resume_select.click()
                 await page.wait_for_timeout(500)
-                # Click first resume option
                 first_resume = await page.query_selector('[data-qa="vacancy-response-popup-form-resume-option"]')
                 if first_resume:
                     await first_resume.click()
@@ -201,12 +200,11 @@ class HHPlaywright:
             if not submit_btn:
                 submit_btn = await page.query_selector('[data-qa="vacancy-response-letter-submit"]')
             if not submit_btn:
-                # Try generic submit in the popup
                 submit_btn = await page.query_selector('.vacancy-response-popup-actions button[type="submit"]')
 
             if submit_btn:
                 await submit_btn.click()
-                await page.wait_for_timeout(3000)
+                await page.wait_for_timeout(5000)
 
                 # Check success
                 success_el = await page.query_selector('[data-qa="vacancy-response-link-view-topic"]')
@@ -215,16 +213,17 @@ class HHPlaywright:
                     await browser_manager.save_context("hh")
                     return True
 
-                # Check if we're on negotiations page (redirect after success)
                 if "/applicant/negotiations" in page.url:
                     log.info("hh_apply_success_redirect", url=vacancy_url)
                     await browser_manager.save_context("hh")
                     return True
 
+            await self._save_debug_screenshot(page, "apply_fail")
             log.warning("hh_apply_uncertain", url=vacancy_url, current_url=page.url)
             return False
 
         except PlaywrightTimeout:
+            await self._save_debug_screenshot(page, "apply_timeout")
             log.error("hh_apply_timeout", url=vacancy_url)
             return False
         except Exception as e:
