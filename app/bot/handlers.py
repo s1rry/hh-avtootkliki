@@ -138,28 +138,47 @@ async def btn_top(message: Message, **kw):
 @router.message(Command("messages"))
 @admin_only
 async def btn_messages(message: Message, **kw):
-    async with async_session() as session:
-        result = await session.execute(
-            select(RecruiterMessage)
-            .where(RecruiterMessage.is_read == False)
-            .order_by(RecruiterMessage.created_at.desc())
-            .limit(10)
-        )
-        messages_list = result.scalars().all()
-
-    if not messages_list:
-        await message.answer("📩 Нет непрочитанных сообщений")
+    await message.answer("🔄 Проверяю статусы откликов на hh.ru...")
+    from app.parsers.hh_playwright import hh_playwright
+    if not hh_playwright:
+        await message.answer("❌ Playwright не доступен")
         return
 
-    for msg in messages_list:
-        text = (
-            f"📩 <b>Сообщение</b>\n\n"
-            f"👤 {msg.sender_name or 'Неизвестно'}\n"
-            f"🏢 {msg.sender_company or '—'}\n"
-            f"📧 {msg.platform}\n\n"
-            f"{msg.text[:500]}"
-        )
-        await message.answer(text, parse_mode="HTML", reply_markup=message_keyboard(msg.id))
+    statuses = await hh_playwright.check_negotiations_status()
+
+    if not statuses:
+        await message.answer("📭 Нет активных откликов")
+        return
+
+    invites = [s for s in statuses if s.get("tab") == "invitations"]
+    discards = [s for s in statuses if s.get("tab") == "discard"]
+    active = [s for s in statuses if s.get("tab") == "active"]
+
+    parts = ["📩 <b>Сообщения и отклики hh.ru</b>"]
+    parts.append(f"\n🎉 Приглашения: <b>{len(invites)}</b>")
+    parts.append(f"📨 Активные: <b>{len(active)}</b>")
+    parts.append(f"❌ Отказы: <b>{len(discards)}</b>")
+
+    if invites:
+        parts.append("\n🎉 <b>Приглашения:</b>")
+        for s in invites[:10]:
+            parts.append(f"  • {s['title'][:60]}\n    🏢 {s['company']}")
+
+    if active:
+        parts.append("\n📨 <b>Активные:</b>")
+        for s in active[:10]:
+            parts.append(f"  • {s['title'][:60]}\n    {s.get('status','')[:60]}")
+
+    if discards:
+        parts.append("\n❌ <b>Отказы:</b>")
+        for s in discards[:5]:
+            parts.append(f"  • {s['title'][:60]} — {s['company'][:30]}")
+
+    text = "\n".join(parts)
+    # Telegram limit ~4096 chars
+    if len(text) > 3900:
+        text = text[:3900] + "\n…"
+    await message.answer(text, parse_mode="HTML")
 
 
 def _settings_text(paused: bool, auto: bool) -> str:

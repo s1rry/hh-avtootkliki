@@ -149,8 +149,12 @@ class HHPlaywright:
         except Exception:
             pass
 
-    async def apply_to_vacancy(self, vacancy_url: str, cover_letter: str) -> bool:
-        """Apply to vacancy via Playwright browser automation."""
+    async def apply_to_vacancy(self, vacancy_url: str, cover_letter: str) -> bool | str:
+        """Apply to vacancy via Playwright browser automation.
+
+        Handles employer questions/test tasks: extracts question text,
+        asks Claude AI to generate an answer, fills it in.
+        """
         if not self._logged_in:
             if not await self.login():
                 return False
@@ -161,52 +165,44 @@ class HHPlaywright:
             await page.goto(vacancy_url, wait_until="domcontentloaded", timeout=45000)
             await random_delay(2, 4)
 
-            # Find "Откликнуться" button
-            apply_btn = await page.query_selector('[data-qa="vacancy-response-link-top"]')
-            if not apply_btn:
-                apply_btn = await page.query_selector('[data-qa="vacancy-response-link-bottom"]')
-            if not apply_btn:
-                applied_el = await page.query_selector('[data-qa="vacancy-response-link-view-topic"]')
-                if applied_el:
-                    await self._save_debug_screenshot(page, "already_applied")
-                    log.info("hh_already_applied", url=vacancy_url)
-                    return "already"
-                await self._save_debug_screenshot(page, "apply_no_btn")
-                log.warning("hh_apply_btn_not_found", url=vacancy_url, page_url=page.url)
-                return False
+            # If hh redirected to /applicant/vacancy_response — skip clicking apply
+            if "/applicant/vacancy_response" not in page.url:
+                apply_btn = await page.query_selector('[data-qa="vacancy-response-link-top"]')
+                if not apply_btn:
+                    apply_btn = await page.query_selector('[data-qa="vacancy-response-link-bottom"]')
+                if not apply_btn:
+                    applied_el = await page.query_selector('[data-qa="vacancy-response-link-view-topic"]')
+                    if applied_el:
+                        await self._save_debug_screenshot(page, "already_applied")
+                        log.info("hh_already_applied", url=vacancy_url)
+                        return "already"
+                    await self._save_debug_screenshot(page, "apply_no_btn")
+                    log.warning("hh_apply_btn_not_found", url=vacancy_url, page_url=page.url)
+                    return False
 
-            await apply_btn.click()
-            await page.wait_for_timeout(3000)
+                try:
+                    async with page.expect_navigation(timeout=10000, wait_until="domcontentloaded"):
+                        await apply_btn.click()
+                except PlaywrightTimeout:
+                    # No navigation — modal opened instead, that's fine
+                    pass
+                await page.wait_for_timeout(2000)
 
-            # Check if cover letter textarea appeared (modal)
-            letter_area = await page.query_selector('[data-qa="vacancy-response-popup-form-letter-input"]')
-            if not letter_area:
-                letter_area = await page.query_selector('textarea[name="text"]')
+            # We're now either on the vacancy_response page or in the response modal
+            await self._fill_response_form(page, cover_letter, vacancy_url)
 
-            if letter_area and cover_letter:
-                await letter_area.fill(cover_letter)
-                await page.wait_for_timeout(1000)
-
-            # Select resume if resume picker is shown
-            resume_select = await page.query_selector('[data-qa="vacancy-response-popup-form-resume-dropdown"]')
-            if resume_select:
-                await resume_select.click()
-                await page.wait_for_timeout(500)
-                first_resume = await page.query_selector('[data-qa="vacancy-response-popup-form-resume-option"]')
-                if first_resume:
-                    await first_resume.click()
-                    await page.wait_for_timeout(500)
-
-            # Submit response
+            # Submit
             submit_btn = await page.query_selector('[data-qa="vacancy-response-submit-popup"]')
             if not submit_btn:
                 submit_btn = await page.query_selector('[data-qa="vacancy-response-letter-submit"]')
+            if not submit_btn:
+                submit_btn = await page.query_selector('button[data-qa*="response-submit"]')
             if not submit_btn:
                 submit_btn = await page.query_selector('.vacancy-response-popup-actions button[type="submit"]')
 
             if submit_btn:
                 await submit_btn.click()
-                await page.wait_for_timeout(5000)
+                await page.wait_for_timeout(6000)
 
                 # Check success
                 success_el = await page.query_selector('[data-qa="vacancy-response-link-view-topic"]')
@@ -215,8 +211,8 @@ class HHPlaywright:
                     await browser_manager.save_context("hh")
                     return True
 
-                if "/applicant/negotiations" in page.url:
-                    log.info("hh_apply_success_redirect", url=vacancy_url)
+                if "/applicant/negotiations" in page.url or "vacancy_response_success" in page.url:
+                    log.info("hh_apply_success_redirect", url=vacancy_url, final=page.url)
                     await browser_manager.save_context("hh")
                     return True
 
@@ -225,12 +221,92 @@ class HHPlaywright:
             return False
 
         except PlaywrightTimeout:
-            await self._save_debug_screenshot(page, "apply_timeout")
+            try:
+                await self._save_debug_screenshot(page, "apply_timeout")
+            except Exception:
+                pass
             log.error("hh_apply_timeout", url=vacancy_url)
             return False
         except Exception as e:
+            try:
+                await self._save_debug_screenshot(page, "apply_error")
+            except Exception:
+                pass
             log.error("hh_apply_error", url=vacancy_url, error=str(e))
             return False
+
+    async def _fill_response_form(self, page: Page, cover_letter: str, vacancy_url: str):
+        """Fill cover letter, employer questions (test task), and resume picker."""
+        from app.ai.claude import claude_ai
+
+        # 1. Find employer question(s) — they appear as labels/textareas on response page
+        question_blocks = await page.query_selector_all('[data-qa="task-body"]')
+        if not question_blocks:
+            question_blocks = await page.query_selector_all('.vacancy-response-question')
+
+        for block in question_blocks:
+            try:
+                # Extract question text
+                q_text_el = await block.query_selector('[data-qa="task-question"]')
+                if not q_text_el:
+                    q_text_el = block
+                question = (await q_text_el.inner_text()).strip()
+
+                # Find answer textarea inside this block
+                answer_area = await block.query_selector('textarea')
+                if not answer_area:
+                    continue
+
+                # Generate answer via Claude
+                log.info("hh_question_found", question=question[:120])
+                from app.config import settings as cfg
+                user_msg = (
+                    f"Вопрос работодателя в отклике на вакансию:\n{question}\n\n"
+                    f"Контекст вакансии: {vacancy_url}\n\n"
+                    "Дай чёткий короткий ответ от первого лица. "
+                    "Используй факты из моего резюме, не выдумывай. "
+                    "Если это тестовое задание — выполни его."
+                )
+                system = (
+                    "Ты — кандидат, отвечающий на вопрос работодателя при отклике. "
+                    f"Профиль кандидата:\n{cfg.resume_text}"
+                )
+                try:
+                    answer_text, _, _ = await claude_ai._call(system, user_msg, max_tokens=800)
+                    answer_text = answer_text.strip()
+                except Exception as e:
+                    log.error("hh_answer_gen_error", error=str(e))
+                    answer_text = "Готов выполнить тестовое задание после уточнения деталей."
+
+                await answer_area.fill(answer_text)
+                await page.wait_for_timeout(800)
+                log.info("hh_question_answered", chars=len(answer_text))
+            except Exception as e:
+                log.warning("hh_question_fill_error", error=str(e))
+
+        # 2. Fill cover letter
+        letter_area = await page.query_selector('[data-qa="vacancy-response-popup-form-letter-input"]')
+        if not letter_area:
+            letter_area = await page.query_selector('[data-qa="cover-letter-input"]')
+        if not letter_area:
+            letter_area = await page.query_selector('textarea[name="text"]')
+
+        if letter_area and cover_letter:
+            await letter_area.fill(cover_letter)
+            await page.wait_for_timeout(800)
+
+        # 3. Resume picker (if multiple resumes)
+        resume_select = await page.query_selector('[data-qa="vacancy-response-popup-form-resume-dropdown"]')
+        if resume_select:
+            try:
+                await resume_select.click()
+                await page.wait_for_timeout(500)
+                first_resume = await page.query_selector('[data-qa="vacancy-response-popup-form-resume-option"]')
+                if first_resume:
+                    await first_resume.click()
+                    await page.wait_for_timeout(500)
+            except Exception:
+                pass
 
     async def check_messages(self) -> list[dict]:
         """Check negotiations/messages on hh.ru."""
@@ -242,7 +318,7 @@ class HHPlaywright:
         messages = []
 
         try:
-            await page.goto(HH_NEGOTIATIONS, wait_until="domcontentloaded", timeout=20000)
+            await page.goto(HH_NEGOTIATIONS, wait_until="domcontentloaded", timeout=45000)
             await random_delay(2, 4)
 
             # Parse negotiations list
@@ -324,7 +400,7 @@ class HHPlaywright:
 
         for tab_name, url in tabs:
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                await page.goto(url, wait_until="domcontentloaded", timeout=45000)
                 await random_delay(1, 3)
 
                 items = await page.query_selector_all('[data-qa="negotiations-item"]')
