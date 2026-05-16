@@ -91,6 +91,11 @@ async def main():
         f"Режим: {'Playwright' if playwright_ok else 'API-only'}",
     )
 
+    # Wait for proxy to stabilize after boot
+    if settings.tg_proxy:
+        log.info("waiting_for_proxy", seconds=15)
+        await asyncio.sleep(15)
+
     try:
         await dp.start_polling(bot)
     finally:
