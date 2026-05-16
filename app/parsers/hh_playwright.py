@@ -40,18 +40,29 @@ class HHPlaywright:
 
         page = await self._get_page()
 
-        # Check if already logged in via saved session
+        # Check if already logged in via saved session (cookies)
         try:
             await page.goto(HH_BASE, wait_until="domcontentloaded", timeout=20000)
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(3000)
 
             # Check for user menu (means logged in)
             logged = await page.query_selector('[data-qa="mainmenu_applicantProfile"]')
+            if not logged:
+                # Try alternative selectors for logged-in state
+                logged = await page.query_selector('[data-qa="mainmenu_myResumes"]')
+            if not logged:
+                logged = await page.query_selector('a[href*="/applicant/resumes"]')
+
             if logged:
                 self._logged_in = True
                 log.info("hh_already_logged_in")
                 await browser_manager.save_context("hh")
                 return True
+
+            # Save screenshot for debugging
+            await self._save_debug_screenshot(page, "login_check")
+            log.warning("hh_session_expired", url=page.url)
+
         except Exception as e:
             log.warning("hh_login_check_error", error=str(e))
 
@@ -75,7 +86,6 @@ class HHPlaywright:
             if login_input:
                 await login_input.fill(settings.hh_login)
             else:
-                # Try alternative selector
                 login_input = await page.query_selector('input[name="login"]')
                 if login_input:
                     await login_input.fill(settings.hh_login)
@@ -105,13 +115,17 @@ class HHPlaywright:
 
             # Check if login was successful
             logged = await page.query_selector('[data-qa="mainmenu_applicantProfile"]')
+            if not logged:
+                logged = await page.query_selector('[data-qa="mainmenu_myResumes"]')
             if logged:
                 self._logged_in = True
                 await browser_manager.save_context("hh")
                 log.info("hh_login_success")
                 return True
 
-            # Check for captcha or error
+            # Save screenshot showing the failure
+            await self._save_debug_screenshot(page, "login_failed")
+
             error_el = await page.query_selector('[data-qa="account-login-error"]')
             if error_el:
                 error_text = await error_el.inner_text()
@@ -124,6 +138,15 @@ class HHPlaywright:
         except Exception as e:
             log.error("hh_login_error", error=str(e))
             return False
+
+    async def _save_debug_screenshot(self, page: Page, name: str):
+        """Save debug screenshot to data/ directory."""
+        try:
+            path = f"data/debug_{name}.png"
+            await page.screenshot(path=path, full_page=False)
+            log.info("debug_screenshot_saved", path=path)
+        except Exception:
+            pass
 
     async def apply_to_vacancy(self, vacancy_url: str, cover_letter: str) -> bool:
         """Apply to vacancy via Playwright browser automation."""

@@ -641,6 +641,16 @@ async def cmd_login(message: Message, **kw):
             "• Возможно требуется капча (попробуйте позже)\n"
             "• Может потребоваться ручной вход через VNC",
         )
+        # Send debug screenshot if available
+        from pathlib import Path
+        from aiogram.types import FSInputFile
+        for name in ("debug_login_failed.png", "debug_login_check.png"):
+            p = Path(f"data/{name}")
+            if p.exists():
+                try:
+                    await message.answer_photo(FSInputFile(p), caption=f"🖼 {name}")
+                except Exception:
+                    pass
 
 
 @router.message(Command("negotiations"))
