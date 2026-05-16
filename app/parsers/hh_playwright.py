@@ -286,16 +286,35 @@ class HHPlaywright:
             except Exception as e:
                 log.warning("hh_question_fill_error", error=str(e))
 
-        # 2. Fill cover letter
+        # 2. Click "Добавить сопроводительное" link if textarea is hidden
+        add_letter_btn = await page.query_selector('[data-qa="vacancy-response-letter-toggle"]')
+        if not add_letter_btn:
+            add_letter_btn = await page.query_selector('button:has-text("Добавить сопроводительное")')
+        if not add_letter_btn:
+            add_letter_btn = await page.query_selector('a:has-text("Добавить сопроводительное")')
+        if add_letter_btn:
+            try:
+                await add_letter_btn.click()
+                await page.wait_for_timeout(800)
+                log.info("hh_letter_toggle_clicked")
+            except Exception as e:
+                log.warning("hh_letter_toggle_error", error=str(e))
+
+        # 3. Fill cover letter
         letter_area = await page.query_selector('[data-qa="vacancy-response-popup-form-letter-input"]')
         if not letter_area:
             letter_area = await page.query_selector('[data-qa="cover-letter-input"]')
         if not letter_area:
             letter_area = await page.query_selector('textarea[name="text"]')
+        if not letter_area:
+            letter_area = await page.query_selector('textarea[placeholder*="опроводительн"]')
 
         if letter_area and cover_letter:
             await letter_area.fill(cover_letter)
             await page.wait_for_timeout(800)
+            log.info("hh_letter_filled", chars=len(cover_letter))
+        elif cover_letter:
+            log.warning("hh_letter_area_not_found")
 
         # 3. Resume picker (if multiple resumes)
         resume_select = await page.query_selector('[data-qa="vacancy-response-popup-form-resume-dropdown"]')
