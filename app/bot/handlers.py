@@ -82,8 +82,20 @@ async def btn_stats(message: Message, **kw):
         approved = await session.scalar(
             select(func.count(Vacancy.id)).where(Vacancy.status == VacancyStatus.APPROVED)
         ) or 0
-        applied = await session.scalar(
+        applied_total = await session.scalar(
             select(func.count(Application.id)).where(Application.status == ApplicationStatus.SENT)
+        ) or 0
+        applied_today = await session.scalar(
+            select(func.count(Application.id)).where(
+                Application.status == ApplicationStatus.SENT,
+                func.date(Application.created_at) == func.current_date(),
+            )
+        ) or 0
+        failed_today = await session.scalar(
+            select(func.count(Application.id)).where(
+                Application.status == ApplicationStatus.FAILED,
+                func.date(Application.created_at) == func.current_date(),
+            )
         ) or 0
         responses = await session.scalar(select(func.count(RecruiterMessage.id))) or 0
         avg_score = await session.scalar(
@@ -91,14 +103,18 @@ async def btn_stats(message: Message, **kw):
         )
 
     score_text = f"{avg_score:.0f}" if avg_score else "—"
+    limit = settings.max_applies_per_day
 
     await message.answer(
         "📊 <b>Статистика</b>\n\n"
         f"📦 Всего вакансий: <b>{total}</b>\n"
         f"🆕 Новые: <b>{new}</b>\n"
         f"🤖 Проанализировано: <b>{analyzed}</b>\n"
-        f"⭐ Одобрено AI: <b>{approved}</b>\n"
-        f"📨 Отправлено откликов: <b>{applied}</b>\n"
+        f"⭐ Одобрено AI: <b>{approved}</b>\n\n"
+        f"📨 <b>Отклики:</b>\n"
+        f"  • Сегодня: <b>{applied_today}/{limit}</b>\n"
+        f"  • Ошибок сегодня: <b>{failed_today}</b>\n"
+        f"  • Всего отправлено: <b>{applied_total}</b>\n\n"
         f"💬 Ответов рекрутеров: <b>{responses}</b>\n"
         f"📈 Средний AI-скор: <b>{score_text}</b>",
         parse_mode="HTML",
@@ -146,13 +162,8 @@ async def btn_messages(message: Message, **kw):
         await message.answer(text, parse_mode="HTML", reply_markup=message_keyboard(msg.id))
 
 
-@router.message(F.text == "⚙️ Настройки")
-@router.message(Command("settings"))
-@admin_only
-async def btn_settings(message: Message, **kw):
-    paused = _scheduler.is_paused if _scheduler else False
-    auto = _scheduler.auto_apply if _scheduler else False
-    await message.answer(
+def _settings_text(paused: bool, auto: bool) -> str:
+    return (
         "⚙️ <b>Настройки</b>\n\n"
         f"📍 Позиция: {settings.desired_position}\n"
         f"💰 Зарплата: {settings.desired_salary_min:,}–{settings.desired_salary_max:,}\n"
@@ -160,7 +171,18 @@ async def btn_settings(message: Message, **kw):
         f"🎯 Макс. откликов/день: {settings.max_applies_per_day}\n"
         f"🔔 Уведомления: {settings.notify_hour_start}:00–{settings.notify_hour_end}:00 МСК\n"
         f"{'⏸ Пауза' if paused else '▶️ Работает'} | "
-        f"{'🟢 Авто-отклик' if auto else '⚪ Авто-отклик выкл'}",
+        f"{'🟢 Авто-отклик ВКЛ' if auto else '⚪ Авто-отклик ВЫКЛ'}"
+    )
+
+
+@router.message(F.text == "⚙️ Настройки")
+@router.message(Command("settings"))
+@admin_only
+async def btn_settings(message: Message, **kw):
+    paused = _scheduler.is_paused if _scheduler else False
+    auto = _scheduler.auto_apply if _scheduler else False
+    await message.answer(
+        _settings_text(paused, auto),
         parse_mode="HTML",
         reply_markup=settings_keyboard(paused, auto),
     )
@@ -575,8 +597,10 @@ async def cb_toggle_pause(callback: CallbackQuery, **kw):
     else:
         _scheduler.pause()
         await callback.answer("⏸ На паузе")
-    await callback.message.edit_reply_markup(
-        reply_markup=settings_keyboard(_scheduler.is_paused, _scheduler.auto_apply)
+    await callback.message.edit_text(
+        _settings_text(_scheduler.is_paused, _scheduler.auto_apply),
+        parse_mode="HTML",
+        reply_markup=settings_keyboard(_scheduler.is_paused, _scheduler.auto_apply),
     )
 
 
@@ -589,8 +613,10 @@ async def cb_toggle_auto(callback: CallbackQuery, **kw):
     _scheduler.auto_apply = not _scheduler.auto_apply
     status = "🟢 ВКЛ" if _scheduler.auto_apply else "⚪ ВЫКЛ"
     await callback.answer(f"Авто-отклик: {status}")
-    await callback.message.edit_reply_markup(
-        reply_markup=settings_keyboard(_scheduler.is_paused, _scheduler.auto_apply)
+    await callback.message.edit_text(
+        _settings_text(_scheduler.is_paused, _scheduler.auto_apply),
+        parse_mode="HTML",
+        reply_markup=settings_keyboard(_scheduler.is_paused, _scheduler.auto_apply),
     )
 
 
