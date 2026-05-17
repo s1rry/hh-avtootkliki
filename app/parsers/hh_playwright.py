@@ -371,22 +371,56 @@ class HHPlaywright:
 
         try:
             await page.goto(HH_NEGOTIATIONS, wait_until="domcontentloaded", timeout=45000)
-            await random_delay(2, 4)
+            try:
+                await page.wait_for_selector(
+                    '[data-qa="negotiations-item"], .negotiations-list-item, [data-qa="empty-negotiations"]',
+                    timeout=10000,
+                )
+            except PlaywrightTimeout:
+                pass
+            await page.wait_for_timeout(2000)
 
-            # Parse negotiations list
-            items = await page.query_selector_all('[data-qa="negotiations-item"]')
-            if not items:
-                # Try alternative selectors
-                items = await page.query_selector_all('.negotiations-list-item')
+            items_data = await page.evaluate(
+                """() => {
+                    const sel = document.querySelectorAll('[data-qa="negotiations-item"], .negotiations-list-item');
+                    const out = [];
+                    for (const el of sel) {
+                        const titleEl = el.querySelector('[data-qa="negotiations-item-title"]')
+                            || el.querySelector('a[href*="/vacancy/"]');
+                        const companyEl = el.querySelector('[data-qa="negotiations-item-company"]');
+                        const statusEl = el.querySelector('[data-qa="negotiations-item-status"]');
+                        const unreadEl = el.querySelector('.negotiations-item__unread, [data-qa="negotiations-item-unread"]');
+                        out.push({
+                            title: titleEl ? (titleEl.innerText || '').trim() : '',
+                            href: titleEl ? titleEl.getAttribute('href') || '' : '',
+                            company: companyEl ? (companyEl.innerText || '').trim() : '',
+                            status: statusEl ? (statusEl.innerText || '').trim() : '',
+                            has_unread: !!unreadEl,
+                        });
+                    }
+                    return out;
+                }"""
+            )
 
-            for item in items[:20]:  # Limit to 20 most recent
-                try:
-                    msg = await self._parse_negotiation_item(item)
-                    if msg:
-                        messages.append(msg)
-                except Exception as e:
-                    log.warning("hh_parse_negotiation_error", error=str(e))
+            for d in items_data[:20]:
+                thread_id = ""
+                href = d.get("href", "")
+                if href:
+                    m = re.search(r"/(\d+)/?$", href)
+                    if m:
+                        thread_id = f"hh_{m.group(1)}"
+                if not d.get("title") and not d.get("status"):
                     continue
+                messages.append({
+                    "platform": "hh",
+                    "title": d.get("title", ""),
+                    "company": d.get("company", ""),
+                    "status": d.get("status", ""),
+                    "text": f"Статус: {d.get('status','')}" if d.get("status") else "",
+                    "thread_id": thread_id,
+                    "sender": d.get("company", ""),
+                    "has_unread": d.get("has_unread", False),
+                })
 
             log.info("hh_messages_fetched", count=len(messages))
 
@@ -453,22 +487,67 @@ class HHPlaywright:
         for tab_name, url in tabs:
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-                await random_delay(1, 3)
+                # Wait for content to settle before scraping
+                try:
+                    await page.wait_for_selector(
+                        '[data-qa="negotiations-item"], .negotiations-list-item, [data-qa="empty-negotiations"]',
+                        timeout=10000,
+                    )
+                except PlaywrightTimeout:
+                    pass
+                await page.wait_for_timeout(2000)
 
-                items = await page.query_selector_all('[data-qa="negotiations-item"]')
-                if not items:
-                    items = await page.query_selector_all('.negotiations-list-item')
+                # Extract all items via single JS evaluation — avoids stale element handles
+                items_data = await page.evaluate(
+                    """() => {
+                        const sel = document.querySelectorAll('[data-qa="negotiations-item"], .negotiations-list-item');
+                        const out = [];
+                        for (const el of sel) {
+                            const titleEl = el.querySelector('[data-qa="negotiations-item-title"]')
+                                || el.querySelector('a[href*="/vacancy/"]');
+                            const companyEl = el.querySelector('[data-qa="negotiations-item-company"]');
+                            const statusEl = el.querySelector('[data-qa="negotiations-item-status"]');
+                            const unreadEl = el.querySelector('.negotiations-item__unread, [data-qa="negotiations-item-unread"]');
+                            out.push({
+                                title: titleEl ? (titleEl.innerText || '').trim() : '',
+                                href: titleEl ? titleEl.getAttribute('href') || '' : '',
+                                company: companyEl ? (companyEl.innerText || '').trim() : '',
+                                status: statusEl ? (statusEl.innerText || '').trim() : '',
+                                has_unread: !!unreadEl,
+                            });
+                        }
+                        return out;
+                    }"""
+                )
 
-                for item in items[:10]:
-                    msg = await self._parse_negotiation_item(item)
-                    if msg:
-                        msg["tab"] = tab_name
-                        statuses.append(msg)
+                for d in items_data[:20]:
+                    thread_id = ""
+                    href = d.get("href", "")
+                    if href:
+                        m = re.search(r"/(\d+)/?$", href)
+                        if m:
+                            thread_id = f"hh_{m.group(1)}"
+                    if not d.get("title") and not d.get("status"):
+                        continue
+                    statuses.append({
+                        "platform": "hh",
+                        "tab": tab_name,
+                        "title": d.get("title", ""),
+                        "company": d.get("company", ""),
+                        "status": d.get("status", ""),
+                        "text": f"Статус: {d.get('status','')}" if d.get("status") else "",
+                        "thread_id": thread_id,
+                        "sender": d.get("company", ""),
+                        "has_unread": d.get("has_unread", False),
+                    })
 
             except Exception as e:
                 log.warning("hh_negotiations_tab_error", tab=tab_name, error=str(e))
 
-        log.info("hh_negotiations_status", total=len(statuses))
+        log.info("hh_negotiations_status", total=len(statuses),
+                 invites=sum(1 for s in statuses if s["tab"] == "invitations"),
+                 discards=sum(1 for s in statuses if s["tab"] == "discard"),
+                 active=sum(1 for s in statuses if s["tab"] == "active"))
         return statuses
 
     async def bump_resumes(self) -> int:
