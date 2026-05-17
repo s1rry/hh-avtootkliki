@@ -109,13 +109,17 @@ async def main():
         except Exception as e:
             log.error("tg_userbot_notify_error", error=str(e))
 
-    try:
-        from app.services.tg_userbot import init_userbot
-        ub = init_userbot(on_tg_dm)
-        ub_ok = await ub.start()
-        log.info("tg_userbot_init", ok=ub_ok)
-    except Exception as e:
-        log.warning("tg_userbot_init_failed", error=str(e))
+    async def _start_userbot_bg():
+        try:
+            from app.services.tg_userbot import init_userbot
+            ub = init_userbot(on_tg_dm)
+            ub_ok = await ub.start()
+            log.info("tg_userbot_init", ok=ub_ok)
+        except Exception as e:
+            log.warning("tg_userbot_init_failed", error=str(e))
+
+    # Run userbot init in background so it doesn't block aiogram polling
+    asyncio.create_task(_start_userbot_bg())
 
     await notify_telegram(
         bot,
