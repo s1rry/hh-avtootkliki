@@ -691,17 +691,32 @@ class HHPlaywright:
                 return 0
 
             await activator.click()
-            await page.wait_for_timeout(4000)
+            await page.wait_for_timeout(5000)
             await self._save_debug_screenshot(page, "thanks_step2_widget_open")
 
-            # 3. Dump widget DOM to find chat list + input selectors
-            widget_info = await page.evaluate(
+            # Try to locate the chatik iframe — widget content usually lives there
+            chat_frame = None
+            for f in page.frames:
+                if "chatik" in (f.url or "") or "chat" in (f.url or ""):
+                    chat_frame = f
+                    log.info("hh_thanks_chat_frame_found", url=f.url)
+                    break
+            if not chat_frame:
+                # Fallback: iframe with chat-related class
+                iframe_el = await page.query_selector('iframe[src*="chat"]')
+                if iframe_el:
+                    chat_frame = await iframe_el.content_frame()
+
+            # Working context: chat_frame if found, else page
+            ctx = chat_frame if chat_frame else page
+
+            # Dump real DOM in the right context
+            widget_info = await ctx.evaluate(
                 """() => {
-                    const all = document.querySelectorAll('[data-qa*="chatik"], [class*="chatik"]');
-                    const found = new Set();
-                    for (const el of all) {
+                    const allDq = new Set();
+                    for (const el of document.querySelectorAll('[data-qa]')) {
                         const dq = el.getAttribute('data-qa');
-                        if (dq) found.add('dq:' + dq);
+                        if (dq) allDq.add(dq);
                     }
                     const inputs = [];
                     for (const el of document.querySelectorAll('textarea, [contenteditable="true"]')) {
@@ -711,18 +726,18 @@ class HHPlaywright:
                             visible: el.offsetParent !== null,
                         });
                     }
-                    return {dq: Array.from(found).slice(0, 60), inputs};
+                    const iframes = Array.from(document.querySelectorAll('iframe')).map(i => i.src);
+                    return {dq: Array.from(allDq).slice(0, 80), inputs, iframes};
                 }"""
             )
-            log.info("hh_thanks_widget_dump", info=widget_info)
+            log.info("hh_thanks_widget_dump", in_frame=bool(chat_frame), info=widget_info)
 
-            # 4. Find rejection chats in the widget — look for "Отказ" status text
-            #    or use data-qa="chatik-chat" / similar
-            chat_items = await page.query_selector_all(
-                '[data-qa*="chatik-chat-item"], [data-qa*="chatik"][data-qa*="chat"]'
+            # 4. Find chats in the widget (ctx = iframe or main page)
+            chat_items = await ctx.query_selector_all(
+                '[data-qa*="chatik-chat-item"], [data-qa*="chat-item"], [class*="chat-item"]'
             )
             if not chat_items:
-                chat_items = await page.query_selector_all('[class*="chatik"] [class*="chat-item"]')
+                chat_items = await ctx.query_selector_all('[role="button"][data-qa*="chat"]')
             log.info("hh_thanks_chat_items", count=len(chat_items))
 
             # Try to find a chat with rejection status
@@ -795,13 +810,12 @@ class HHPlaywright:
             chat_input = None
             for sel in input_selectors:
                 try:
-                    el = await page.query_selector(sel)
+                    el = await ctx.query_selector(sel)
                     if el:
-                        # ensure visible
                         visible = await el.is_visible()
                         if visible:
                             chat_input = el
-                            log.info("hh_thanks_input_found", selector=sel)
+                            log.info("hh_thanks_input_found", selector=sel, in_frame=bool(chat_frame))
                             break
                 except Exception:
                     pass
@@ -826,7 +840,7 @@ class HHPlaywright:
             send_btn = None
             for sel in send_selectors:
                 try:
-                    el = await page.query_selector(sel)
+                    el = await ctx.query_selector(sel)
                     if el:
                         send_btn = el
                         log.info("hh_thanks_send_btn_found", selector=sel)
