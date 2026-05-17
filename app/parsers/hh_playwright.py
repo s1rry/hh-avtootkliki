@@ -707,44 +707,61 @@ class HHPlaywright:
 
             ctx = page  # widget lives in main DOM, not iframe
 
-            # Find chats that contain "Отказ" text — pure text search,
-            # don't rely on specific data-qa attributes
-            rejection_handles = await page.evaluate_handle(
+            # Search every element that contains literally "Отказ" near the top,
+            # take the innermost clickable ancestor and click it directly in JS.
+            click_result = await page.evaluate(
                 """() => {
-                    const out = [];
-                    const all = document.querySelectorAll('div[role="button"], li, div[tabindex]');
-                    for (const el of all) {
-                        const text = (el.innerText || '').trim();
-                        if (!text || text.length > 300) continue;
-                        if (/отказ/i.test(text) && el.offsetParent !== null) {
-                            // pick the smallest container that still has "Отказ"
-                            out.push(el);
+                    // Find all elements whose immediate text equals 'Отказ' or contains 'Отказ' as own short text
+                    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                    const matches = [];
+                    let node;
+                    while ((node = walker.nextNode())) {
+                        const t = (node.nodeValue || '').trim();
+                        if (t === 'Отказ' || /^Отказ$/i.test(t)) {
+                            if (node.parentElement && node.parentElement.offsetParent !== null) {
+                                matches.push(node.parentElement);
+                            }
                         }
                     }
-                    // Keep outermost unique cards — drop nested duplicates
-                    const filtered = out.filter(el => !out.some(o => o !== el && o.contains(el)));
-                    return filtered;
+                    if (!matches.length) {
+                        // Fallback: any visible element whose innerText starts/contains 'Отказ'
+                        const all = document.querySelectorAll('*');
+                        for (const el of all) {
+                            if (el.children.length === 0) {
+                                const t = (el.innerText || '').trim();
+                                if (/отказ/i.test(t) && t.length < 50 && el.offsetParent !== null) {
+                                    matches.push(el);
+                                }
+                            }
+                        }
+                    }
+                    if (!matches.length) return {count: 0};
+
+                    // For first match, walk up to find a clickable card
+                    let target = matches[0];
+                    for (let i = 0; i < 10; i++) {
+                        if (!target.parentElement) break;
+                        const p = target.parentElement;
+                        // A clickable card usually has cursor:pointer, role=button or onclick
+                        const cs = window.getComputedStyle(p);
+                        if (cs.cursor === 'pointer' || p.getAttribute('role') === 'button' || p.hasAttribute('tabindex')) {
+                            target = p;
+                            break;
+                        }
+                        target = p;
+                    }
+                    target.scrollIntoView({block: 'center'});
+                    target.click();
+                    return {count: matches.length, clicked: true, tag: target.tagName, cls: (target.className || '').toString().slice(0, 80)};
                 }"""
             )
-            count = await page.evaluate("els => els.length", rejection_handles)
-            log.info("hh_thanks_rejection_chats_found", count=count)
+            log.info("hh_thanks_click_result", info=click_result)
 
-            if count == 0:
+            if not click_result or not click_result.get("count"):
                 await self._save_debug_screenshot(page, "thanks_step3_no_chats")
                 return 0
 
-            # Click first rejection chat
-            clicked = await page.evaluate(
-                """els => {
-                    if (!els.length) return false;
-                    els[0].click();
-                    return true;
-                }""",
-                rejection_handles,
-            )
-            if not clicked:
-                return 0
-            await page.wait_for_timeout(3500)
+            await page.wait_for_timeout(4500)
             await self._save_debug_screenshot(page, "thanks_step3_chat_open")
 
             # Dump all chatik-* data-qa to discover real selectors
