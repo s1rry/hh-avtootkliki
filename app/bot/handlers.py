@@ -72,7 +72,38 @@ async def cmd_start(message: Message, **kw):
 @admin_only
 async def btn_stats(message: Message, **kw):
     async with async_session() as session:
-        total = await session.scalar(select(func.count(Vacancy.id))) or 0
+        # By-platform vacancy counts
+        platform_rows = (await session.execute(
+            select(Vacancy.platform, func.count(Vacancy.id))
+            .group_by(Vacancy.platform)
+        )).all()
+        platform_vac = {p: c for p, c in platform_rows}
+
+        # By-platform application counts (today + total sent)
+        app_today_rows = (await session.execute(
+            select(Application.platform, func.count(Application.id))
+            .where(
+                Application.status == ApplicationStatus.SENT,
+                func.date(Application.created_at) == func.current_date(),
+            )
+            .group_by(Application.platform)
+        )).all()
+        app_today = {p: c for p, c in app_today_rows}
+
+        app_total_rows = (await session.execute(
+            select(Application.platform, func.count(Application.id))
+            .where(Application.status == ApplicationStatus.SENT)
+            .group_by(Application.platform)
+        )).all()
+        app_total = {p: c for p, c in app_total_rows}
+
+        failed_today = await session.scalar(
+            select(func.count(Application.id)).where(
+                Application.status == ApplicationStatus.FAILED,
+                func.date(Application.created_at) == func.current_date(),
+            )
+        ) or 0
+
         new = await session.scalar(
             select(func.count(Vacancy.id)).where(Vacancy.status == VacancyStatus.NEW)
         ) or 0
@@ -82,22 +113,14 @@ async def btn_stats(message: Message, **kw):
         approved = await session.scalar(
             select(func.count(Vacancy.id)).where(Vacancy.status == VacancyStatus.APPROVED)
         ) or 0
-        applied_total = await session.scalar(
-            select(func.count(Application.id)).where(Application.status == ApplicationStatus.SENT)
-        ) or 0
-        applied_today = await session.scalar(
-            select(func.count(Application.id)).where(
-                Application.status == ApplicationStatus.SENT,
-                func.date(Application.created_at) == func.current_date(),
-            )
-        ) or 0
-        failed_today = await session.scalar(
-            select(func.count(Application.id)).where(
-                Application.status == ApplicationStatus.FAILED,
-                func.date(Application.created_at) == func.current_date(),
-            )
-        ) or 0
-        responses = await session.scalar(select(func.count(RecruiterMessage.id))) or 0
+
+        # Recruiter messages by platform
+        msg_rows = (await session.execute(
+            select(RecruiterMessage.platform, func.count(RecruiterMessage.id))
+            .group_by(RecruiterMessage.platform)
+        )).all()
+        msg_by_plat = {p: c for p, c in msg_rows}
+
         avg_score = await session.scalar(
             select(func.avg(Vacancy.ai_score)).where(Vacancy.ai_score.is_not(None))
         )
@@ -105,18 +128,39 @@ async def btn_stats(message: Message, **kw):
     score_text = f"{avg_score:.0f}" if avg_score else "—"
     limit = settings.max_applies_per_day
 
+    PLATFORMS = [("hh", "hh.ru"), ("habr", "Хабр Карьера"), ("avito", "Авито")]
+    by_plat_lines = []
+    for code, label in PLATFORMS:
+        v = platform_vac.get(code, 0)
+        t = app_today.get(code, 0)
+        tt = app_total.get(code, 0)
+        m = msg_by_plat.get(code, 0)
+        marker = "" if v or tt else " (нет данных)"
+        by_plat_lines.append(
+            f"<b>{label}</b>{marker}\n"
+            f"  📦 Вакансий в БД: {v}\n"
+            f"  📨 Отклики сегодня: {t}\n"
+            f"  📨 Откликов всего: {tt}\n"
+            f"  💬 Сообщений рекрутеров: {m}"
+        )
+
+    total_vac = sum(platform_vac.values())
+    total_today = sum(app_today.values())
+    total_all = sum(app_total.values())
+
     await message.answer(
         "📊 <b>Статистика</b>\n\n"
-        f"📦 Всего вакансий: <b>{total}</b>\n"
+        f"📦 Всего вакансий: <b>{total_vac}</b>\n"
         f"🆕 Новые: <b>{new}</b>\n"
         f"🤖 Проанализировано: <b>{analyzed}</b>\n"
-        f"⭐ Одобрено AI: <b>{approved}</b>\n\n"
-        f"📨 <b>Отклики:</b>\n"
-        f"  • Сегодня: <b>{applied_today}/{limit}</b>\n"
+        f"⭐ Одобрено AI: <b>{approved}</b>\n"
+        f"📈 Средний AI-скор: <b>{score_text}</b>\n\n"
+        f"📨 <b>Отклики (всего):</b>\n"
+        f"  • Сегодня: <b>{total_today}/{limit}</b>\n"
         f"  • Ошибок сегодня: <b>{failed_today}</b>\n"
-        f"  • Всего отправлено: <b>{applied_total}</b>\n\n"
-        f"💬 Ответов рекрутеров: <b>{responses}</b>\n"
-        f"📈 Средний AI-скор: <b>{score_text}</b>",
+        f"  • Всего отправлено: <b>{total_all}</b>\n\n"
+        "🏷 <b>По платформам:</b>\n\n"
+        + "\n\n".join(by_plat_lines),
         parse_mode="HTML",
     )
 
@@ -597,7 +641,10 @@ async def cb_ai_reply(callback: CallbackQuery, **kw):
         msg_text = msg.text
 
     await callback.answer("🤖 Генерирую ответ...")
-    reply, _, _ = await claude_ai.generate_reply(msg_text)
+    async with async_session() as session:
+        m = await session.get(RecruiterMessage, msg_id)
+        plat = m.platform if m else ""
+    reply, _, _ = await claude_ai.generate_reply(msg_text, platform=plat)
 
     async with async_session() as session:
         msg = await session.get(RecruiterMessage, msg_id)

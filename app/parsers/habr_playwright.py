@@ -14,6 +14,7 @@ log = structlog.get_logger()
 HABR_BASE = "https://career.habr.com"
 # Habr Career uses Habr Account SSO for login
 HABR_LOGIN_URL = "https://career.habr.com/users/auth/tmid"
+HABR_RESPONSES = "https://career.habr.com/responses"
 
 
 class HabrPlaywright:
@@ -156,6 +157,64 @@ class HabrPlaywright:
         except Exception as e:
             log.error("habr_apply_error", url=vacancy_url, error=str(e))
             return False
+
+
+    async def check_messages(self) -> list[dict]:
+        """Scrape /responses page for messages from employers."""
+        if not self._logged_in:
+            if not await self.login():
+                return []
+
+        page = await self._get_page()
+        out: list[dict] = []
+        try:
+            await page.goto(HABR_RESPONSES, wait_until="domcontentloaded", timeout=45000)
+            await page.wait_for_timeout(3500)
+
+            items = await page.evaluate(
+                """() => {
+                    const cards = document.querySelectorAll('.response-card, [class*="response-card"], .responses-list__item');
+                    const out = [];
+                    for (const c of cards) {
+                        const titleEl = c.querySelector('a[href*="/vacancies/"]');
+                        const companyEl = c.querySelector('a[href*="/companies/"]');
+                        const statusEl = c.querySelector('[class*="status"], .response-card__status');
+                        // Try to find unread / message indicator
+                        const unreadEl = c.querySelector('[class*="unread"], [class*="new"]');
+                        const lastMsgEl = c.querySelector('[class*="message"], .response-card__last-message');
+                        out.push({
+                            title: titleEl ? (titleEl.innerText || '').trim() : '',
+                            href: titleEl ? titleEl.getAttribute('href') || '' : '',
+                            company: companyEl ? (companyEl.innerText || '').trim() : '',
+                            status: statusEl ? (statusEl.innerText || '').trim() : '',
+                            text: lastMsgEl ? (lastMsgEl.innerText || '').trim() : '',
+                            has_unread: !!unreadEl,
+                        });
+                    }
+                    return out;
+                }"""
+            )
+
+            for d in items[:30]:
+                if not d.get("title") and not d.get("status"):
+                    continue
+                href = d.get("href", "")
+                thread_id = f"habr_{href}" if href else ""
+                out.append({
+                    "platform": "habr",
+                    "title": d.get("title", ""),
+                    "company": d.get("company", ""),
+                    "status": d.get("status", ""),
+                    "text": d.get("text") or (f"Статус: {d.get('status','')}" if d.get("status") else ""),
+                    "thread_id": thread_id,
+                    "sender": d.get("company", ""),
+                    "has_unread": d.get("has_unread", False),
+                })
+
+            log.info("habr_messages_fetched", count=len(out))
+        except Exception as e:
+            log.error("habr_messages_error", error=str(e))
+        return out
 
 
 habr_playwright: HabrPlaywright | None = None

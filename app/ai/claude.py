@@ -83,11 +83,13 @@ class ClaudeAI:
         log.info("ai_cover_letter_generated", title=vacancy_title[:60])
         return text.strip(), inp_tok, out_tok
 
-    async def generate_reply(self, recruiter_message: str, vacancy_context: str = "") -> tuple[str, int, int]:
+    async def generate_reply(self, recruiter_message: str, vacancy_context: str = "", platform: str = "") -> tuple[str, int, int]:
+        platform_name = {"hh": "hh.ru", "habr": "Хабр Карьера", "avito": "Авито"}.get(platform, platform or "сайт вакансий")
         system = SYSTEM_REPLY_GENERATOR.format(
             resume=settings.resume_text,
             salary_min=settings.desired_salary_min,
             salary_max=settings.desired_salary_max,
+            platform=platform_name,
         )
         user_msg = f"""Сообщение рекрутера:
 {recruiter_message}

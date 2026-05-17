@@ -182,6 +182,9 @@ class HabrParser(BaseParser):
         return False
 
     async def check_messages(self) -> list[dict]:
+        pw = self._get_playwright()
+        if pw:
+            return await pw.check_messages()
         return []
 
     def _get_playwright(self):

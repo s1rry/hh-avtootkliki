@@ -137,13 +137,18 @@ class WorkerScheduler:
         try:
             new_msgs = await check_all_messages()
             if new_msgs:
+                platform_label = {"hh": "hh.ru", "habr": "Хабр Карьера", "avito": "Авито"}
                 for msg in new_msgs:
+                    plat = msg.get("platform", "")
+                    label = platform_label.get(plat, plat or "—")
+                    title = msg.get("title") or ""
+                    title_line = f"\n📋 {title[:100]}" if title else ""
                     text = (
-                        f"📩 <b>Новое сообщение!</b>\n\n"
-                        f"👤 {msg['sender'] or 'Неизвестно'}\n"
-                        f"🏢 {msg['company'] or '—'}\n"
-                        f"📧 {msg['platform']}\n\n"
-                        f"{msg['text'][:500]}"
+                        f"📩 <b>Новое сообщение — {label}</b>\n\n"
+                        f"👤 {msg.get('sender') or 'Неизвестно'}\n"
+                        f"🏢 {msg.get('company') or '—'}"
+                        f"{title_line}\n\n"
+                        f"{msg.get('text', '')[:600]}"
                     )
                     await self._notify_if_allowed(text)
         except Exception as e:
