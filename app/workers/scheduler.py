@@ -106,13 +106,8 @@ class WorkerScheduler:
             # pushing the first bump 4 hours into the future
             next_run_time=datetime.now(MSK) + timedelta(minutes=5),
         )
-        self.scheduler.add_job(
-            self._job_thank_rejections,
-            "interval",
-            hours=6,
-            id="thank_rejections",
-            name="Активность в чатах",
-        )
+        # Note: rejection thanks disabled — hh.ru blocks writing in chats
+        # after the employer rejects the response.
 
         self.scheduler.start()
         log.info("scheduler_started", interval=interval)

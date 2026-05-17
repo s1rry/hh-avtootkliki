@@ -82,6 +82,5 @@ def settings_keyboard(is_paused: bool = False, auto_apply: bool = False) -> Inli
         ],
         [
             InlineKeyboardButton(text="⬆️ Поднять резюме", callback_data="bump_resume"),
-            InlineKeyboardButton(text="💬 Спасибо за отказы", callback_data="thank_rejections"),
         ],
     ])
