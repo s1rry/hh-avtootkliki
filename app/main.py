@@ -81,6 +81,36 @@ async def main():
     set_scheduler(scheduler)
     scheduler.start()
 
+    # Telegram user-bot — listens for DMs on second account
+    async def on_tg_dm(msg: dict):
+        from app.workers.message_worker import _save_message
+        from datetime import datetime, timezone
+        saved = await _save_message(msg)
+        if not saved:
+            return
+        text = (
+            f"📩 <b>Личное сообщение — Telegram (2-й аккаунт)</b>\n\n"
+            f"👤 {msg.get('sender') or 'Неизвестно'}"
+            + (f" (@{msg['sender_username']})" if msg.get("sender_username") else "")
+            + f"\n\n{msg.get('text','')[:600]}"
+        )
+        try:
+            await bot.send_message(
+                chat_id=settings.tg_admin_chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as e:
+            log.error("tg_userbot_notify_error", error=str(e))
+
+    try:
+        from app.services.tg_userbot import init_userbot
+        ub = init_userbot(on_tg_dm)
+        ub_ok = await ub.start()
+        log.info("tg_userbot_init", ok=ub_ok)
+    except Exception as e:
+        log.warning("tg_userbot_init_failed", error=str(e))
+
     await notify_telegram(
         bot,
         "🚀 <b>Job Hunter запущен!</b>\n\n"
