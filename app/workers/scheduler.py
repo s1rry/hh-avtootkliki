@@ -80,6 +80,7 @@ class WorkerScheduler:
             id="message_check",
             name="Проверка сообщений",
         )
+        from datetime import datetime, timedelta
         self.scheduler.add_job(
             self._job_apply,
             "interval",
@@ -89,6 +90,8 @@ class WorkerScheduler:
             coalesce=True,
             max_instances=1,
             misfire_grace_time=60,
+            # First run 60s after start instead of after interval*2
+            next_run_time=datetime.now(MSK) + timedelta(seconds=60),
         )
         self.scheduler.add_job(
             self._job_bump_resume,
