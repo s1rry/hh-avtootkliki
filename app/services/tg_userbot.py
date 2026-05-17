@@ -70,16 +70,26 @@ class TGUserBot:
         @self.client.on(events.NewMessage(incoming=True))
         async def handler(event):
             try:
+                log.info(
+                    "tg_userbot_incoming",
+                    is_private=event.is_private,
+                    chat_id=getattr(event, "chat_id", None),
+                    preview=(event.raw_text or "")[:50],
+                )
                 # Only personal DMs from individuals (not channels/groups/bots)
                 if not event.is_private:
+                    log.info("tg_userbot_skip_not_private")
                     return
                 sender = await event.get_sender()
                 if not sender:
+                    log.info("tg_userbot_skip_no_sender")
                     return
                 if getattr(sender, "bot", False):
+                    log.info("tg_userbot_skip_bot", sender_id=sender.id)
                     return
                 # Skip self
                 if sender.id == me.id:
+                    log.info("tg_userbot_skip_self")
                     return
 
                 first = (sender.first_name or "").strip()
