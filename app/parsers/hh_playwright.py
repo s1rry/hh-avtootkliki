@@ -21,6 +21,16 @@ HH_NEGOTIATIONS = "https://hh.ru/applicant/negotiations"
 HH_RESUMES = "https://hh.ru/applicant/resumes"
 
 
+def _classify_status(status: str) -> str:
+    """Map hh.ru status text to one of: invitations, discard, active."""
+    s = (status or "").lower()
+    if any(k in s for k in ("приглаш", "пригласил", "ждёт", "ждет", "интервью", "собеседование")):
+        return "invitations"
+    if any(k in s for k in ("отказ", "не подош", "отклонил", "решил остановить")):
+        return "discard"
+    return "active"
+
+
 class HHPlaywright:
     """Playwright-based hh.ru automation for login, apply, messages."""
 
@@ -498,7 +508,11 @@ class HHPlaywright:
         }
 
     async def check_negotiations_status(self) -> list[dict]:
-        """Check the status of all active negotiations (invites, rejections, etc.)."""
+        """Check the status of all active negotiations (invites, rejections, etc.).
+
+        hh.ru ignores ?state= URL params in the new chat widget — we fetch
+        the page once and classify each chat by its status text instead.
+        """
         if not self._logged_in:
             if not await self.login():
                 return []
@@ -506,11 +520,8 @@ class HHPlaywright:
         page = await self._get_page()
         statuses = []
 
-        tabs = [
-            ("invitations", f"{HH_NEGOTIATIONS}?page=0&filter=response&state=invitation"),
-            ("discard", f"{HH_NEGOTIATIONS}?page=0&filter=response&state=discard"),
-            ("active", f"{HH_NEGOTIATIONS}?page=0&filter=response&state=response"),
-        ]
+        # Single fetch — categorize by status text
+        tabs = [("all", HH_NEGOTIATIONS)]
 
         for tab_name, url in tabs:
             try:
@@ -592,7 +603,7 @@ class HHPlaywright:
                         full_topic_url = topic_url if topic_url.startswith("http") else f"https://hh.ru{topic_url}"
                     statuses.append({
                         "platform": "hh",
-                        "tab": tab_name,
+                        "tab": _classify_status(d.get("status", "")),
                         "title": d.get("title", ""),
                         "company": d.get("company", ""),
                         "status": d.get("status", ""),
