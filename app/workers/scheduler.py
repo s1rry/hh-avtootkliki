@@ -99,6 +99,12 @@ class WorkerScheduler:
             hours=4,
             id="bump_resume",
             name="Поднятие резюме",
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=60,
+            # Fire 5 min after start so frequent restarts don't keep
+            # pushing the first bump 4 hours into the future
+            next_run_time=datetime.now(MSK) + timedelta(minutes=5),
         )
         self.scheduler.add_job(
             self._job_thank_rejections,
