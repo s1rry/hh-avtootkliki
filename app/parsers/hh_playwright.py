@@ -508,9 +508,14 @@ class HHPlaywright:
                             const companyEl = el.querySelector('[data-qa="negotiations-item-company"]');
                             const statusEl = el.querySelector('[data-qa="negotiations-item-status"]');
                             const unreadEl = el.querySelector('.negotiations-item__unread, [data-qa="negotiations-item-unread"]');
+                            // Find link to the negotiation/topic chat itself
+                            const topicEl = el.querySelector('a[href*="topicId="]')
+                                || el.querySelector('a[href*="/negotiations/item"]')
+                                || el.querySelector('a[href*="/negotiations/"]');
                             out.push({
                                 title: titleEl ? (titleEl.innerText || '').trim() : '',
                                 href: titleEl ? titleEl.getAttribute('href') || '' : '',
+                                topic_url: topicEl ? topicEl.getAttribute('href') || '' : '',
                                 company: companyEl ? (companyEl.innerText || '').trim() : '',
                                 status: statusEl ? (statusEl.innerText || '').trim() : '',
                                 has_unread: !!unreadEl,
@@ -522,13 +527,24 @@ class HHPlaywright:
 
                 for d in items_data[:20]:
                     thread_id = ""
+                    topic_url = d.get("topic_url", "") or ""
                     href = d.get("href", "")
-                    if href:
-                        m = re.search(r"/(\d+)/?$", href)
-                        if m:
-                            thread_id = f"hh_{m.group(1)}"
+                    # Prefer topicId from real negotiation link
+                    m = re.search(r"topicId=(\d+)", topic_url)
+                    if not m:
+                        m = re.search(r"/negotiations/(?:item/)?(\d+)", topic_url)
+                    if m:
+                        thread_id = f"hh_{m.group(1)}"
+                    elif href:
+                        m2 = re.search(r"/(\d+)/?$", href)
+                        if m2:
+                            thread_id = f"hh_{m2.group(1)}"
                     if not d.get("title") and not d.get("status"):
                         continue
+                    # Build absolute negotiation URL
+                    full_topic_url = ""
+                    if topic_url:
+                        full_topic_url = topic_url if topic_url.startswith("http") else f"https://hh.ru{topic_url}"
                     statuses.append({
                         "platform": "hh",
                         "tab": tab_name,
@@ -537,6 +553,7 @@ class HHPlaywright:
                         "status": d.get("status", ""),
                         "text": f"Статус: {d.get('status','')}" if d.get("status") else "",
                         "thread_id": thread_id,
+                        "topic_url": full_topic_url,
                         "sender": d.get("company", ""),
                         "has_unread": d.get("has_unread", False),
                     })
@@ -622,7 +639,8 @@ class HHPlaywright:
                 chat_input = await page.query_selector('textarea[name="message"]')
 
             if not chat_input:
-                log.warning("hh_chat_input_not_found", url=negotiation_url)
+                await self._save_debug_screenshot(page, "chat_input_not_found")
+                log.warning("hh_chat_input_not_found", url=negotiation_url, page_url=page.url)
                 return False
 
             message = "Спасибо за обратную связь! Желаю успехов в подборе кандидата."

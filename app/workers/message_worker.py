@@ -100,6 +100,16 @@ async def process_rejection_thanks(max_count: int = 3) -> int:
     statuses = await hh_playwright.check_negotiations_status()
     rejections = [s for s in statuses if s.get("tab") == "discard"]
 
+    log.info(
+        "rejection_thanks_candidates",
+        total=len(rejections),
+        with_thread_id=sum(1 for r in rejections if r.get("thread_id")),
+        sample=[
+            {"thread_id": r.get("thread_id"), "title": r.get("title", "")[:40]}
+            for r in rejections[:3]
+        ],
+    )
+
     sent_count = 0
     async with async_session() as session:
         for rej in rejections[:max_count * 2]:  # check 2x in case some already done
@@ -107,6 +117,7 @@ async def process_rejection_thanks(max_count: int = 3) -> int:
                 break
             thread_id = rej.get("thread_id")
             if not thread_id:
+                log.info("rejection_skip_no_thread_id", title=rej.get("title", "")[:60])
                 continue
 
             # Skip if already thanked (we mark via is_read=True + sender_name="__thanks_sent__")
@@ -117,13 +128,18 @@ async def process_rejection_thanks(max_count: int = 3) -> int:
                 )
             )
             if already:
+                log.info("rejection_skip_already_done", thread_id=thread_id)
                 continue
 
-            # Build negotiation URL from thread_id (hh_<id> -> /negotiations/<id>)
-            tid = thread_id.replace("hh_", "")
-            url = f"https://hh.ru/applicant/negotiations/item?topicId={tid}"
+            # Prefer the real topic URL we scraped from the page
+            url = rej.get("topic_url") or ""
+            if not url:
+                tid = thread_id.replace("hh_", "")
+                url = f"https://hh.ru/applicant/negotiations/item?topicId={tid}"
+            log.info("rejection_attempting", thread_id=thread_id, url=url)
 
             success = await hh_playwright.send_rejection_thanks(url)
+            log.info("rejection_attempt_result", thread_id=thread_id, success=success)
             if success:
                 session.add(RecruiterMessage(
                     platform="hh",
