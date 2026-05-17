@@ -11,6 +11,11 @@ class Settings(BaseSettings):
     tg_api_server: str = ""  # Custom Telegram Bot API URL (e.g. for proxy)
     tg_proxy: str = ""  # SOCKS5/HTTP proxy for Telegram (e.g. socks5://127.0.0.1:40000)
 
+    # Telegram user-bot (second account — listens for recruiter DMs)
+    telegram_api_id: int = 0
+    telegram_api_hash: str = ""
+    telegram_session_string: str = ""
+
     # Anthropic
     anthropic_api_key: str = ""
     anthropic_base_url: str = ""
