@@ -204,8 +204,10 @@ class HHPlaywright:
                 submit_btn = await page.query_selector('button:has-text("Откликнуться")')
 
             if submit_btn:
+                await self._save_debug_screenshot(page, "apply_before_submit")
                 await submit_btn.click()
                 await page.wait_for_timeout(6000)
+                await self._save_debug_screenshot(page, "apply_after_submit")
 
                 # Check success
                 success_el = await page.query_selector('[data-qa="vacancy-response-link-view-topic"]')
@@ -218,6 +220,16 @@ class HHPlaywright:
                     log.info("hh_apply_success_redirect", url=vacancy_url, final=page.url)
                     await browser_manager.save_context("hh")
                     return True
+
+                # Look for inline validation errors
+                err_text = await page.evaluate(
+                    """() => {
+                        const errs = document.querySelectorAll('[class*="error"], [data-qa*="error"]');
+                        return Array.from(errs).slice(0, 5).map(e => (e.innerText || '').trim()).filter(Boolean);
+                    }"""
+                )
+                if err_text:
+                    log.warning("hh_apply_validation_errors", errors=err_text)
 
             await self._save_debug_screenshot(page, "apply_fail")
             log.warning("hh_apply_uncertain", url=vacancy_url, current_url=page.url)
@@ -243,17 +255,33 @@ class HHPlaywright:
         from app.ai.claude import claude_ai
         from app.config import settings as cfg
 
-        # 1. Find ALL textareas with "Писать тут" placeholder — those are question answers
-        #    For each one extract the question text from the closest preceding label/text.
-        question_textareas = await page.query_selector_all('textarea[placeholder*="исать тут"]')
-        # Fallback to old hh format
+        # 1. Find ALL textareas that look like employer-question answer fields.
+        # On the new hh response page they have placeholder "Писать тут",
+        # but if hh changes wording we want to be robust — take any visible
+        # textarea that isn't the cover-letter textarea.
+        all_textareas = await page.query_selector_all('textarea')
+        question_textareas = []
+        for ta in all_textareas:
+            try:
+                if not await ta.is_visible():
+                    continue
+                placeholder = (await ta.get_attribute('placeholder')) or ''
+                data_qa = (await ta.get_attribute('data-qa')) or ''
+                name = (await ta.get_attribute('name')) or ''
+                # Skip the cover-letter textarea
+                if 'letter' in data_qa.lower() or name == 'text' or 'опровод' in placeholder.lower():
+                    continue
+                question_textareas.append(ta)
+            except Exception:
+                continue
+        # Fallback to old hh format with task-body blocks
         if not question_textareas:
             blocks = await page.query_selector_all('[data-qa="task-body"]')
-            question_textareas = []
             for b in blocks:
                 ta = await b.query_selector('textarea')
                 if ta:
                     question_textareas.append(ta)
+        log.info("hh_question_textareas_found", count=len(question_textareas))
 
         for ta in question_textareas:
             try:
