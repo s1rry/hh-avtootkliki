@@ -501,35 +501,52 @@ class HHPlaywright:
                 items_data = await page.evaluate(
                     """() => {
                         const sel = document.querySelectorAll('[data-qa="negotiations-item"], .negotiations-list-item');
+                        // If no items found by data-qa, try generic — find any link list inside main
                         const out = [];
-                        for (const el of sel) {
+                        let firstHtml = '';
+                        for (let i = 0; i < sel.length; i++) {
+                            const el = sel[i];
+                            if (i === 0) {
+                                firstHtml = (el.outerHTML || '').substring(0, 1500);
+                            }
                             const titleEl = el.querySelector('[data-qa="negotiations-item-title"]')
-                                || el.querySelector('a[href*="/vacancy/"]');
+                                || el.querySelector('a[href*="/vacancy/"]')
+                                || el.querySelector('a');
                             const companyEl = el.querySelector('[data-qa="negotiations-item-company"]');
                             const statusEl = el.querySelector('[data-qa="negotiations-item-status"]');
                             const unreadEl = el.querySelector('.negotiations-item__unread, [data-qa="negotiations-item-unread"]');
-                            // Find link to the negotiation/topic chat itself
-                            const topicEl = el.querySelector('a[href*="topicId="]')
-                                || el.querySelector('a[href*="/negotiations/item"]')
-                                || el.querySelector('a[href*="/negotiations/"]');
+                            // Collect ALL links inside the item — we'll pick the topic one in Python
+                            const allLinks = Array.from(el.querySelectorAll('a')).map(a => a.getAttribute('href') || '').filter(Boolean);
                             out.push({
                                 title: titleEl ? (titleEl.innerText || '').trim() : '',
                                 href: titleEl ? titleEl.getAttribute('href') || '' : '',
-                                topic_url: topicEl ? topicEl.getAttribute('href') || '' : '',
+                                all_links: allLinks,
                                 company: companyEl ? (companyEl.innerText || '').trim() : '',
                                 status: statusEl ? (statusEl.innerText || '').trim() : '',
                                 has_unread: !!unreadEl,
                             });
                         }
-                        return out;
+                        return {items: out, sample_html: firstHtml};
                     }"""
                 )
+                if isinstance(items_data, dict):
+                    if items_data.get("sample_html"):
+                        log.info("hh_neg_sample_html", tab=tab_name, html=items_data["sample_html"][:800])
+                    items_data = items_data.get("items", [])
 
                 for d in items_data[:20]:
                     thread_id = ""
-                    topic_url = d.get("topic_url", "") or ""
+                    topic_url = ""
                     href = d.get("href", "")
-                    # Prefer topicId from real negotiation link
+                    all_links = d.get("all_links", []) or []
+
+                    # Find topic link among all links
+                    for link in all_links:
+                        if "topicId=" in link or "/negotiations/item" in link:
+                            topic_url = link
+                            break
+
+                    # Extract topicId from topic_url
                     m = re.search(r"topicId=(\d+)", topic_url)
                     if not m:
                         m = re.search(r"/negotiations/(?:item/)?(\d+)", topic_url)
