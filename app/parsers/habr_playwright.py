@@ -39,9 +39,11 @@ class HabrPlaywright:
         try:
             await page.goto(HABR_BASE, wait_until="domcontentloaded", timeout=45000)
             await page.wait_for_timeout(2500)
-            logged = await page.query_selector('a[href="/users/logout"], [data-qa="header__user"]')
-            if not logged:
-                logged = await page.query_selector('a[href*="/users/"][href*="/profile"]')
+            logged = await page.query_selector(
+                'a[href="/profile/personal/edit"], a[href="/responses"], '
+                'a[href*="/profile/favorites"], a[href="/users/logout"], '
+                '[data-qa="header__user"]'
+            )
             if logged:
                 self._logged_in = True
                 await browser_manager.save_context("habr")
@@ -80,9 +82,11 @@ class HabrPlaywright:
 
             await page.wait_for_timeout(5000)
 
-            logged = await page.query_selector('a[href="/users/logout"], [data-qa="header__user"]')
-            if not logged:
-                logged = await page.query_selector('a[href*="/users/"][href*="/profile"]')
+            logged = await page.query_selector(
+                'a[href="/profile/personal/edit"], a[href="/responses"], '
+                'a[href*="/profile/favorites"], a[href="/users/logout"], '
+                '[data-qa="header__user"]'
+            )
             if logged:
                 self._logged_in = True
                 await browser_manager.save_context("habr")
