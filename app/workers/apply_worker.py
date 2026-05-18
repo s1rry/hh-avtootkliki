@@ -1,4 +1,5 @@
 import asyncio
+import re
 import structlog
 from sqlalchemy import select, func
 
@@ -14,8 +15,42 @@ from app.utils.anti_detect import random_delay
 log = structlog.get_logger()
 
 
+async def sync_applied_from_hh() -> int:
+    """Fetch list of vacancies already applied to on hh.ru via API and
+    mark them as APPLIED in DB so the bot doesn't waste time re-applying."""
+    from app.parsers.hh_api import hh_api_client
+    try:
+        ids = await asyncio.wait_for(hh_api_client.fetch_applied_vacancy_ids(), timeout=30)
+    except asyncio.TimeoutError:
+        log.warning("sync_applied_timeout")
+        return 0
+    if not ids:
+        return 0
+    marked = 0
+    async with async_session() as session:
+        result = await session.execute(
+            select(Vacancy).where(
+                Vacancy.platform == "hh",
+                Vacancy.external_id.in_(ids),
+                Vacancy.status != VacancyStatus.APPLIED,
+            )
+        )
+        for v in result.scalars().all():
+            v.status = VacancyStatus.APPLIED
+            marked += 1
+        if marked:
+            await session.commit()
+    log.info("sync_applied_complete", marked=marked, fetched=len(ids))
+    return marked
+
+
 async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
     log.info("auto_apply_started", auto_mode=auto_mode, min_score=min_score)
+    # Pre-sync from HH negotiations to skip already-applied vacancies
+    try:
+        await sync_applied_from_hh()
+    except Exception as e:
+        log.warning("sync_applied_skip", error=str(e))
     applied = 0
 
     # Per-platform daily limits
@@ -89,16 +124,26 @@ async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
                 ))
                 await session.commit()
 
-            # Отправляем отклик с глобальным таймаутом 2 минуты
+            # Fast path: HH через прямой API (~1 сек вместо ~60 сек Playwright)
             result = False
-            parser = None
             if vacancy.platform == "hh":
-                parser = HHParser()
+                from app.parsers.hh_api import hh_api_client
+                # Extract numeric vacancy id from URL
+                m = re.search(r"/vacancy/(\d+)", vacancy.url)
+                vid = m.group(1) if m else vacancy.external_id
+                try:
+                    result, info = await asyncio.wait_for(
+                        hh_api_client.apply(vid, letter),
+                        timeout=20,
+                    )
+                    if result is not True and result != "already":
+                        log.warning("hh_api_apply_failed", vacancy_id=vacancy.id, info=info)
+                except asyncio.TimeoutError:
+                    log.error("hh_api_apply_timeout", vacancy_id=vacancy.id)
+                    result = False
             elif vacancy.platform == "habr":
                 from app.parsers.habr import HabrParser
                 parser = HabrParser()
-
-            if parser:
                 try:
                     await asyncio.wait_for(parser.login(), timeout=60)
                     result = await asyncio.wait_for(
