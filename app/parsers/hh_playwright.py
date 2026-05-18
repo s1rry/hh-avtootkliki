@@ -21,6 +21,40 @@ HH_NEGOTIATIONS = "https://hh.ru/applicant/negotiations"
 HH_RESUMES = "https://hh.ru/applicant/resumes"
 
 
+async def human_type(element, text: str, min_ms: int = 30, max_ms: int = 120):
+    """Type text into element with random per-character delay.
+    Uses click() to focus, then press_sequentially with mid-range delay.
+    For very random feel we split text into 3-5 chunks with varied speeds.
+    """
+    import random
+    if not text:
+        return
+    try:
+        await element.click()
+    except Exception:
+        pass
+    try:
+        await element.fill("")  # clear existing
+    except Exception:
+        pass
+    # Type in chunks with varied speed to look more human
+    chunk_size = max(20, len(text) // 6)
+    pos = 0
+    while pos < len(text):
+        chunk = text[pos:pos + chunk_size]
+        delay = random.randint(min_ms, max_ms)
+        try:
+            await element.press_sequentially(chunk, delay=delay)
+        except Exception:
+            # fallback
+            try:
+                await element.type(chunk, delay=delay)
+            except Exception:
+                await element.fill(text)
+                return
+        pos += chunk_size
+
+
 def _classify_status(status: str) -> str:
     """Map hh.ru status text to one of: invitations, discard, pending."""
     s = (status or "").lower()
@@ -380,7 +414,7 @@ class HHPlaywright:
                     log.error("hh_answer_gen_error", error=str(e))
                     answer_text = "Готов обсудить детали на собеседовании."
 
-                await ta.fill(answer_text)
+                await human_type(ta, answer_text, cfg.type_delay_min, cfg.type_delay_max)
                 await page.wait_for_timeout(700)
                 log.info("hh_question_answered", chars=len(answer_text), q=question[:60])
             except Exception as e:
@@ -415,7 +449,7 @@ class HHPlaywright:
             letter_area = await page.query_selector('textarea[placeholder*="опроводительн"]')
 
         if letter_area and cover_letter:
-            await letter_area.fill(cover_letter)
+            await human_type(letter_area, cover_letter, cfg.type_delay_min, cfg.type_delay_max)
             await page.wait_for_timeout(800)
             log.info("hh_letter_filled", chars=len(cover_letter))
         elif cover_letter:

@@ -133,7 +133,9 @@ class HabrPlaywright:
             if not letter_area:
                 letter_area = await page.query_selector('textarea')
             if letter_area and cover_letter:
-                await letter_area.fill(cover_letter)
+                from app.parsers.hh_playwright import human_type
+                from app.config import settings as cfg
+                await human_type(letter_area, cover_letter, cfg.type_delay_min, cfg.type_delay_max)
                 await page.wait_for_timeout(800)
 
             # Submit

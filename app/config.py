@@ -55,8 +55,11 @@ class Settings(BaseSettings):
     max_applies_per_day: int = 200            # legacy (combined cap)
     max_applies_per_day_hh: int = 200
     max_applies_per_day_habr: int = 50
-    apply_delay_min: int = 60
-    apply_delay_max: int = 90
+    apply_delay_min: int = 3
+    apply_delay_max: int = 12
+    # Human-like typing speed (ms per character)
+    type_delay_min: int = 30
+    type_delay_max: int = 120
 
     # Notifications
     notify_hour_start: int = 9   # С какого часа присылать уведомления (МСК)
