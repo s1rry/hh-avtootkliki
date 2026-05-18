@@ -18,31 +18,49 @@ async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
     log.info("auto_apply_started", auto_mode=auto_mode, min_score=min_score)
     applied = 0
 
-    # Проверяем дневной лимит
+    # Per-platform daily limits
+    platform_caps = {
+        "hh": settings.max_applies_per_day_hh,
+        "habr": settings.max_applies_per_day_habr,
+    }
     async with async_session() as session:
-        today_count = await session.scalar(
-            select(func.count(Application.id)).where(
+        today_rows = (await session.execute(
+            select(Application.platform, func.count(Application.id))
+            .where(
                 Application.status == ApplicationStatus.SENT,
                 func.date(Application.created_at) == func.current_date(),
             )
-        )
-        if today_count >= settings.max_applies_per_day:
-            log.info("daily_limit_reached", count=today_count)
+            .group_by(Application.platform)
+        )).all()
+        today_by_plat = {p: c for p, c in today_rows}
+
+        remaining_by_plat: dict[str, int] = {}
+        for plat, cap in platform_caps.items():
+            done = today_by_plat.get(plat, 0)
+            left = max(0, cap - done)
+            if left > 0:
+                remaining_by_plat[plat] = left
+
+        if not remaining_by_plat:
+            log.info("daily_limit_reached", today=today_by_plat)
             return 0
 
-        remaining = settings.max_applies_per_day - today_count
-
-        # Берём одобренные вакансии с высоким скором
-        result = await session.execute(
-            select(Vacancy)
-            .where(
-                Vacancy.status == VacancyStatus.APPROVED,
-                Vacancy.ai_score >= min_score,
+        # Берём одобренные вакансии по платформам с лимитом per-platform
+        all_vacs = []
+        for plat, limit in remaining_by_plat.items():
+            result = await session.execute(
+                select(Vacancy)
+                .where(
+                    Vacancy.platform == plat,
+                    Vacancy.status == VacancyStatus.APPROVED,
+                    Vacancy.ai_score >= min_score,
+                )
+                .order_by(Vacancy.ai_score.desc())
+                .limit(limit)
             )
-            .order_by(Vacancy.ai_score.desc())
-            .limit(remaining)
-        )
-        vacancies = result.scalars().all()
+            all_vacs.extend(result.scalars().all())
+        # Mix platforms a bit: interleave
+        vacancies = all_vacs
 
     for vacancy in vacancies:
         try:
@@ -115,7 +133,7 @@ async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
                 success=success,
             )
 
-            await random_delay(10, 30)
+            await random_delay(settings.apply_delay_min, settings.apply_delay_max)
 
         except Exception as e:
             log.error("apply_error", vacancy_id=vacancy.id, error=str(e))

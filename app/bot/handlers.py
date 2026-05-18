@@ -824,6 +824,135 @@ async def cmd_login(message: Message, **kw):
                     pass
 
 
+@router.message(Command("test_apply"))
+@admin_only
+async def cmd_test_apply(message: Message, **kw):
+    """Run N test applies on hh with full screenshots in TG.
+    Usage: /test_apply [count]   default 10
+    """
+    parts = (message.text or "").split()
+    n = 10
+    if len(parts) > 1:
+        try:
+            n = max(1, min(int(parts[1]), 20))
+        except ValueError:
+            pass
+
+    await message.answer(f"🧪 Запускаю тест-отклики hh: {n} штук со скриншотами. Это займёт ~{n*2} мин.")
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(Vacancy)
+            .options(selectinload(Vacancy.company))
+            .where(
+                Vacancy.platform == "hh",
+                Vacancy.status == VacancyStatus.APPROVED,
+                Vacancy.ai_score >= 70,
+            )
+            .order_by(Vacancy.ai_score.desc())
+            .limit(n)
+        )
+        vacancies = result.scalars().all()
+
+    if not vacancies:
+        await message.answer("❌ Нет одобренных вакансий hh для теста")
+        return
+
+    from app.parsers.hh import HHParser
+    from app.ai.claude import claude_ai
+    from pathlib import Path
+    from aiogram.types import FSInputFile
+    import asyncio as _async
+    from app.utils.anti_detect import random_delay
+    from app.models.application import Application, ApplicationStatus
+
+    parser = HHParser()
+    try:
+        await _async.wait_for(parser.login(), timeout=60)
+    except _async.TimeoutError:
+        await message.answer("❌ Login timeout")
+        return
+
+    stats = {"sent": 0, "already": 0, "failed": 0}
+    for i, v in enumerate(vacancies, 1):
+        tag = f"{i:02d}"
+        title = (v.title or "")[:60]
+        company = _company_name(v) or "—"
+
+        await message.answer(f"<b>[{tag}]</b> {title}\n🏢 {company}\n🤖 Генерирую письмо...", parse_mode="HTML")
+
+        try:
+            letter, _, _ = await claude_ai.generate_cover_letter(v.title, v.description or "")
+        except Exception as e:
+            await message.answer(f"❌ AI ошибка: {e}")
+            stats["failed"] += 1
+            continue
+
+        try:
+            res = await _async.wait_for(
+                parser.apply_to_vacancy(v.url, letter, screenshot_name=tag),
+                timeout=180,
+            )
+        except _async.TimeoutError:
+            res = False
+
+        # Send result + screenshots
+        status_emoji = "✅" if res is True else ("ℹ️" if res == "already" else "❌")
+        result_label = {True: "ОТПРАВЛЕНО", "already": "Уже откликались", False: "ОШИБКА"}.get(res, "ОШИБКА")
+        await message.answer(f"{status_emoji} <b>[{tag}]</b> {result_label}\n🔗 {v.url}", parse_mode="HTML")
+
+        for stage in ("before", "after"):
+            p = Path(f"data/test_apply_{tag}_{stage}.png")
+            if p.exists():
+                try:
+                    await message.answer_photo(FSInputFile(p), caption=f"[{tag}] {stage}")
+                except Exception:
+                    pass
+
+        if res is True:
+            stats["sent"] += 1
+            # Record real application
+            async with async_session() as session:
+                vv = await session.get(Vacancy, v.id)
+                if vv:
+                    vv.status = VacancyStatus.APPLIED
+                    session.add(Application(
+                        vacancy_id=v.id, platform="hh",
+                        cover_letter=letter,
+                        status=ApplicationStatus.SENT,
+                        attempt_count=1,
+                    ))
+                    await session.commit()
+        elif res == "already":
+            stats["already"] += 1
+            async with async_session() as session:
+                vv = await session.get(Vacancy, v.id)
+                if vv:
+                    vv.status = VacancyStatus.APPLIED
+                    await session.commit()
+        else:
+            stats["failed"] += 1
+            async with async_session() as session:
+                session.add(Application(
+                    vacancy_id=v.id, platform="hh",
+                    cover_letter=letter,
+                    status=ApplicationStatus.FAILED,
+                    attempt_count=1,
+                ))
+                await session.commit()
+
+        if i < len(vacancies):
+            await random_delay(settings.apply_delay_min, settings.apply_delay_max)
+
+    await message.answer(
+        f"📊 <b>Итоги теста ({len(vacancies)} попыток):</b>\n"
+        f"✅ Отправлено: {stats['sent']}\n"
+        f"ℹ️ Уже откликались: {stats['already']}\n"
+        f"❌ Ошибки: {stats['failed']}",
+        parse_mode="HTML",
+    )
+
+
 @router.message(Command("negotiations"))
 @admin_only
 async def cmd_negotiations(message: Message, **kw):

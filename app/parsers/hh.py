@@ -174,11 +174,11 @@ class HHParser:
             log.error("hh_details_error", url=url, error=str(e))
             return None
 
-    async def apply_to_vacancy(self, url: str, cover_letter: str) -> bool:
+    async def apply_to_vacancy(self, url: str, cover_letter: str, screenshot_name: str | None = None) -> bool:
         """Apply via Playwright if available, otherwise skip."""
         pw = self._get_playwright()
         if pw:
-            return await pw.apply_to_vacancy(url, cover_letter)
+            return await pw.apply_to_vacancy(url, cover_letter, screenshot_name=screenshot_name)
         log.warning("hh_apply_not_supported", url=url, reason="playwright not available")
         return False
 

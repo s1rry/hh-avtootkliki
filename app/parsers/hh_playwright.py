@@ -160,11 +160,15 @@ class HHPlaywright:
         except Exception:
             pass
 
-    async def apply_to_vacancy(self, vacancy_url: str, cover_letter: str) -> bool | str:
+    async def apply_to_vacancy(self, vacancy_url: str, cover_letter: str, screenshot_name: str | None = None) -> bool | str:
         """Apply to vacancy via Playwright browser automation.
 
         Handles employer questions/test tasks: extracts question text,
         asks Claude AI to generate an answer, fills it in.
+
+        If screenshot_name is given, saves screenshots before+after submit
+        as data/test_apply_{screenshot_name}_{before,after}.png — used by
+        /test_apply command to give visual feedback.
         """
         if not self._logged_in:
             if not await self.login():
@@ -215,6 +219,11 @@ class HHPlaywright:
                 submit_btn = await page.query_selector('button:has-text("Откликнуться")')
 
             if submit_btn:
+                if screenshot_name:
+                    try:
+                        await page.screenshot(path=f"data/test_apply_{screenshot_name}_before.png")
+                    except Exception:
+                        pass
                 await submit_btn.click()
 
                 # Wait up to 12s for any of: URL change to negotiations,
@@ -241,6 +250,11 @@ class HHPlaywright:
                         pass
 
                 if success:
+                    if screenshot_name:
+                        try:
+                            await page.screenshot(path=f"data/test_apply_{screenshot_name}_after.png")
+                        except Exception:
+                            pass
                     log.info("hh_apply_success", url=vacancy_url, final=page.url)
                     await browser_manager.save_context("hh")
                     return True
@@ -259,6 +273,11 @@ class HHPlaywright:
                     pass
 
             await self._save_debug_screenshot(page, "apply_fail")
+            if screenshot_name:
+                try:
+                    await page.screenshot(path=f"data/test_apply_{screenshot_name}_after.png")
+                except Exception:
+                    pass
             log.warning("hh_apply_uncertain", url=vacancy_url, current_url=page.url)
             return False
 
