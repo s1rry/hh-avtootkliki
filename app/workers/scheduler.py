@@ -116,9 +116,7 @@ class WorkerScheduler:
         if self.is_paused:
             return
         try:
-            new_count = await run_vacancy_search()
-            if new_count > 0:
-                await self._notify_if_allowed(f"🔍 Найдено {new_count} новых вакансий")
+            await run_vacancy_search()
         except Exception as e:
             log.error("job_search_error", error=str(e))
 
@@ -126,9 +124,7 @@ class WorkerScheduler:
         if self.is_paused:
             return
         try:
-            analyzed = await run_vacancy_analysis()
-            if analyzed > 0:
-                await self._notify_if_allowed(f"🤖 Проанализировано {analyzed} вакансий")
+            await run_vacancy_analysis()
         except Exception as e:
             log.error("job_analyze_error", error=str(e))
 
