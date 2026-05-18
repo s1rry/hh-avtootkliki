@@ -46,6 +46,12 @@ async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
             return 0
 
         # Берём одобренные вакансии по платформам с лимитом per-platform
+        # Исключаем те, что уже падали 3+ раз (бессмысленно ретраить)
+        from sqlalchemy import select as _select
+        failed_3plus = _select(Application.vacancy_id).where(
+            Application.status == ApplicationStatus.FAILED,
+        ).group_by(Application.vacancy_id).having(func.count(Application.id) >= 3)
+
         all_vacs = []
         for plat, limit in remaining_by_plat.items():
             result = await session.execute(
@@ -54,6 +60,7 @@ async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
                     Vacancy.platform == plat,
                     Vacancy.status == VacancyStatus.APPROVED,
                     Vacancy.ai_score >= min_score,
+                    Vacancy.id.notin_(failed_3plus),
                 )
                 .order_by(Vacancy.ai_score.desc())
                 .limit(limit)
