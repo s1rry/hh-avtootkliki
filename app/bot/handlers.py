@@ -126,20 +126,26 @@ async def btn_stats(message: Message, **kw):
         )
 
     score_text = f"{avg_score:.0f}" if avg_score else "—"
-    limit = settings.max_applies_per_day
 
-    PLATFORMS = [("hh", "hh.ru"), ("habr", "Хабр Карьера"), ("avito", "Авито")]
+    PLATFORMS = [
+        ("hh", "hh.ru", settings.max_applies_per_day_hh),
+        ("habr", "Хабр Карьера", settings.max_applies_per_day_habr),
+        ("avito", "Авито", 0),
+    ]
     by_plat_lines = []
-    for code, label in PLATFORMS:
+    for code, label, cap in PLATFORMS:
         v = platform_vac.get(code, 0)
         t = app_today.get(code, 0)
         tt = app_total.get(code, 0)
         m = msg_by_plat.get(code, 0)
-        marker = "" if v or tt else " (нет данных)"
+        if cap == 0 and v == 0 and tt == 0:
+            by_plat_lines.append(f"<b>{label}</b> — (отключено)")
+            continue
+        cap_txt = f"/{cap}" if cap else ""
         by_plat_lines.append(
-            f"<b>{label}</b>{marker}\n"
+            f"<b>{label}</b>\n"
             f"  📦 Вакансий в БД: {v}\n"
-            f"  📨 Отклики сегодня: {t}\n"
+            f"  📨 Отклики сегодня: <b>{t}{cap_txt}</b>\n"
             f"  📨 Откликов всего: {tt}\n"
             f"  💬 Сообщений рекрутеров: {m}"
         )
@@ -147,6 +153,7 @@ async def btn_stats(message: Message, **kw):
     total_vac = sum(platform_vac.values())
     total_today = sum(app_today.values())
     total_all = sum(app_total.values())
+    total_cap = settings.max_applies_per_day_hh + settings.max_applies_per_day_habr
 
     await message.answer(
         "📊 <b>Статистика</b>\n\n"
@@ -156,7 +163,7 @@ async def btn_stats(message: Message, **kw):
         f"⭐ Одобрено AI: <b>{approved}</b>\n"
         f"📈 Средний AI-скор: <b>{score_text}</b>\n\n"
         f"📨 <b>Отклики (всего):</b>\n"
-        f"  • Сегодня: <b>{total_today}/{limit}</b>\n"
+        f"  • Сегодня: <b>{total_today}/{total_cap}</b>\n"
         f"  • Ошибок сегодня: <b>{failed_today}</b>\n"
         f"  • Всего отправлено: <b>{total_all}</b>\n\n"
         "🏷 <b>По платформам:</b>\n\n"
@@ -225,9 +232,13 @@ def _settings_text(paused: bool, auto: bool) -> str:
         "⚙️ <b>Настройки</b>\n\n"
         f"📍 Позиция: {settings.desired_position}\n"
         f"💰 Зарплата: {settings.desired_salary_min:,}–{settings.desired_salary_max:,}\n"
-        f"⏱ Интервал: {settings.check_interval_sec // 60} мин\n"
-        f"🎯 Макс. откликов/день: {settings.max_applies_per_day}\n"
-        f"🔔 Уведомления: {settings.notify_hour_start}:00–{settings.notify_hour_end}:00 МСК\n"
+        f"⏱ Интервал поиска: {settings.check_interval_sec // 60} мин\n"
+        f"🎯 Лимит откликов/день:\n"
+        f"   • hh.ru: <b>{settings.max_applies_per_day_hh}</b>\n"
+        f"   • Хабр Карьера: <b>{settings.max_applies_per_day_habr}</b>\n"
+        f"⏱ Задержка между откликами: {settings.apply_delay_min}–{settings.apply_delay_max} сек\n"
+        f"⌨️ Скорость печати: {settings.type_delay_min}–{settings.type_delay_max} мс/символ\n"
+        f"🔔 Уведомления: {settings.notify_hour_start}:00–{settings.notify_hour_end}:00 МСК\n\n"
         f"{'⏸ Пауза' if paused else '▶️ Работает'} | "
         f"{'🟢 Авто-отклик ВКЛ' if auto else '⚪ Авто-отклик ВЫКЛ'}"
     )
