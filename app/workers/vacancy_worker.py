@@ -15,6 +15,7 @@ from app.parsers.workspace import WorkspaceParser
 from app.parsers.geekjob import GeekJobParser
 from app.parsers.habr import HabrParser
 from app.ai.claude import claude_ai
+from app.ai.rule_analyzer import analyze_vacancy as rule_analyze
 from app.utils.anti_detect import random_delay
 
 log = structlog.get_logger()
@@ -187,11 +188,16 @@ async def run_vacancy_analysis():
                             vacancy = v
                         await random_delay(3, 8)
 
-            # AI-анализ
-            analysis = await claude_ai.analyze_vacancy(
-                vacancy.title,
-                vacancy.description or "",
-                vacancy.skills or "",
+            # Rule-based анализ — без трат AI-токенов
+            analysis = rule_analyze(
+                title=vacancy.title,
+                description=vacancy.description or "",
+                skills=vacancy.skills or "",
+                salary_from=vacancy.salary_from,
+                salary_to=vacancy.salary_to,
+                is_remote=bool(vacancy.is_remote),
+                desired_salary_min=settings.desired_salary_min,
+                desired_salary_max=settings.desired_salary_max,
             )
 
             async with async_session() as session:
@@ -204,7 +210,7 @@ async def run_vacancy_analysis():
                 await session.commit()
 
             analyzed += 1
-            await random_delay(2, 5)
+            await random_delay(0, 2)
 
         except Exception as e:
             log.error("vacancy_analysis_error", vacancy_id=vacancy.id, error=str(e))
