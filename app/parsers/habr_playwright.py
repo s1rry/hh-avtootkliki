@@ -100,6 +100,26 @@ class HabrPlaywright:
             log.error("habr_login_error", error=str(e))
             return False
 
+    async def is_logged_in(self) -> bool:
+        """Verify Habr Career session is alive."""
+        page = await self._get_page()
+        try:
+            await page.goto(HABR_BASE, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(2000)
+            for sel in (
+                'a[href="/profile/personal/edit"]',
+                'a[href="/responses"]',
+                'a[href="/users/logout"]',
+            ):
+                if await page.query_selector(sel):
+                    self._logged_in = True
+                    return True
+            self._logged_in = False
+            return False
+        except Exception as e:
+            log.warning("habr_login_check_error", error=str(e))
+            return False
+
     async def apply_to_vacancy(self, vacancy_url: str, cover_letter: str) -> bool | str:
         if not self._logged_in:
             if not await self.login():

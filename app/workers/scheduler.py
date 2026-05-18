@@ -109,6 +109,18 @@ class WorkerScheduler:
         # Note: rejection thanks disabled — hh.ru blocks writing in chats
         # after the employer rejects the response.
 
+        self.scheduler.add_job(
+            self._job_check_login_health,
+            "interval",
+            minutes=30,
+            id="login_health",
+            name="Проверка сессий",
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=60,
+            next_run_time=datetime.now(MSK) + timedelta(minutes=10),
+        )
+
         self.scheduler.start()
         log.info("scheduler_started", interval=interval)
 
@@ -185,6 +197,52 @@ class WorkerScheduler:
                 await self._notify_if_allowed(f"⬆️ Поднято резюме: {count}")
         except Exception as e:
             log.error("job_bump_resume_error", error=str(e))
+
+    async def _job_check_login_health(self):
+        """Every 30 min verify hh + habr login. If any expired,
+        notify in TG and pause auto_apply for that platform."""
+        try:
+            from app.parsers.hh_playwright import hh_playwright
+            from app.parsers.habr_playwright import habr_playwright
+
+            issues: list[str] = []
+            if hh_playwright:
+                try:
+                    ok = await hh_playwright.is_logged_in()
+                except Exception:
+                    ok = False
+                if not ok:
+                    issues.append("hh.ru")
+                    log.warning("login_health_hh_expired")
+            if habr_playwright:
+                try:
+                    ok = await habr_playwright.is_logged_in()
+                except Exception:
+                    ok = False
+                if not ok:
+                    issues.append("Хабр Карьера")
+                    log.warning("login_health_habr_expired")
+
+            if issues:
+                msg = (
+                    "⚠️ <b>Сессия слетела:</b> " + ", ".join(issues) + "\n"
+                    "Авто-отклики приостановлены до перелогина.\n"
+                    "Нужен VNC: попроси «запускай VNC для hh» или «для habr»."
+                )
+                # Notify always (not via _notify_if_allowed) — это критично
+                if self.notify:
+                    try:
+                        await self.notify(msg)
+                    except Exception as e:
+                        log.error("login_health_notify_error", error=str(e))
+                # Auto-pause auto_apply until manual fix
+                if self.auto_apply:
+                    self.set_auto_apply(False)
+                    log.info("auto_apply_disabled_session_expired")
+            else:
+                log.info("login_health_ok")
+        except Exception as e:
+            log.error("job_login_health_error", error=str(e))
 
     async def _job_thank_rejections(self):
         """Send thanks message to recent rejected negotiations.

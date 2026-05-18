@@ -81,12 +81,21 @@ async def main():
     while True:
         await asyncio.sleep(5)
         try:
-            current = await page.query_selector('[data-qa="mainmenu_applicantProfile"]')
-            if not current:
-                current = await page.query_selector('[data-qa="mainmenu_myResumes"]')
-            if not current:
-                current = await page.query_selector('a[href*="/applicant/resumes"]')
-            if current:
+            # STRICT detector: must navigate to /applicant/resumes successfully
+            # AND see user-specific content (resume list / avatar dropdown).
+            # On guest page hh redirects to /account/login.
+            check_url = page.url
+            if "/account/login" in check_url:
+                continue
+            # If still on guest, the "Войти" button is visible
+            login_btn = await page.query_selector('[data-qa="login"]')
+            if login_btn:
+                continue
+            # Look for elements only present when logged in
+            avatar = await page.query_selector('[data-qa="mainmenu-user"], button[data-qa*="user"]')
+            resumes_link = await page.query_selector('[data-qa="mainmenu_myResumes"]')
+            applicant_profile = await page.query_selector('[data-qa="mainmenu_applicantProfile"]')
+            if avatar or resumes_link or applicant_profile:
                 print("\nLogin detected! Saving cookies...")
                 state = await ctx.storage_state()
                 storage_path.parent.mkdir(parents=True, exist_ok=True)

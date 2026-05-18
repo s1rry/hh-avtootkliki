@@ -693,6 +693,36 @@ class HHPlaywright:
                  pending=sum(1 for s in statuses if s["tab"] == "pending"))
         return statuses
 
+    async def is_logged_in(self) -> bool:
+        """Cheap check: visit /applicant/resumes and see if we get redirected
+        to login. Returns True only if we land on a real applicant page."""
+        page = await self._get_page()
+        try:
+            await page.goto(
+                "https://hh.ru/applicant/resumes",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            await page.wait_for_timeout(2000)
+            url = page.url
+            if "/account/login" in url or "/auth/" in url:
+                self._logged_in = False
+                return False
+            # Look for user menu / resume list
+            for sel in (
+                '[data-qa="mainmenu-user"]',
+                '[data-qa="mainmenu_myResumes"]',
+                '[data-qa="resume"]',
+            ):
+                if await page.query_selector(sel):
+                    self._logged_in = True
+                    return True
+            self._logged_in = False
+            return False
+        except Exception as e:
+            log.warning("hh_login_check_error", error=str(e))
+            return False
+
     async def bump_resumes(self) -> int:
         """Click 'Поднять в поиске' on all resumes. Returns number bumped."""
         if not self._logged_in:
