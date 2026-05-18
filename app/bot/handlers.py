@@ -330,20 +330,48 @@ async def _fetch_balance(base_url: str, api_key: str) -> dict | None:
                 f"{base_url}/v1/balance",
                 headers={"Authorization": f"Bearer {api_key}"},
             )
+            if resp.status_code != 200:
+                return None
             return resp.json()
     except Exception:
         return None
 
 
-def _format_provider(name: str, base_url: str, data: dict | None) -> str:
+# Providers that don't expose /v1/balance — only dashboard
+_DASHBOARD_URLS = {
+    "api.tonwave.dev": "https://tonwave.dev/dashboard",
+    "waveapi.tonvarex.ru": "https://wave.tonvarex.ru/dashboard",
+}
+
+
+def _provider_name(base_url: str) -> str:
+    if "tonwave" in base_url:
+        return "TonWave"
+    if "tonvarex" in base_url or "waveapi" in base_url:
+        return "WaveAPI"
+    return base_url
+
+
+def _dashboard_for(base_url: str) -> str | None:
+    for host, url in _DASHBOARD_URLS.items():
+        if host in base_url:
+            return url
+    return None
+
+
+def _format_provider(label: str, base_url: str, data: dict | None) -> str:
+    name = _provider_name(base_url)
+    dash = _dashboard_for(base_url)
     if not data:
-        return f"<b>{name}</b>\n  ❌ нет ответа от {base_url}"
+        if dash:
+            return f"<b>{label} — {name}</b>\n  ℹ️ Баланс через API недоступен.\n  🔗 <a href=\"{dash}\">Открыть дашборд</a>"
+        return f"<b>{label} — {name}</b>\n  ❌ нет ответа от {base_url}"
     balance = data.get("balance_cents", 0)
     inp = data.get("total_input_tokens", 0)
     out = data.get("total_output_tokens", 0)
     total = data.get("total_tokens_used", 0)
     return (
-        f"<b>{name}</b>\n"
+        f"<b>{label} — {name}</b>\n"
         f"  💰 {balance} центов (${balance/100:.2f})\n"
         f"  📥 in: <b>{inp:,}</b>\n"
         f"  📤 out: <b>{out:,}</b>\n"
@@ -356,18 +384,18 @@ async def _send_balance(target):
     parts = ["💎 <b>Балансы AI</b>"]
 
     primary_data = await _fetch_balance(settings.anthropic_base_url, settings.anthropic_api_key)
-    parts.append(_format_provider("Основной (WaveAPI)", settings.anthropic_base_url, primary_data))
+    parts.append(_format_provider("Основной", settings.anthropic_base_url, primary_data))
 
     if settings.anthropic_fallback_api_key:
         fb_data = await _fetch_balance(settings.anthropic_fallback_base_url, settings.anthropic_fallback_api_key)
-        parts.append(_format_provider("Резерв (TonWave)", settings.anthropic_fallback_base_url, fb_data))
+        parts.append(_format_provider("Резерв", settings.anthropic_fallback_base_url, fb_data))
 
     text = "\n\n".join(parts)
     if isinstance(target, CallbackQuery):
-        await target.message.answer(text, parse_mode="HTML")
+        await target.message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
         await target.answer()
     else:
-        await target.answer(text, parse_mode="HTML")
+        await target.answer(text, parse_mode="HTML", disable_web_page_preview=True)
 
 
 # ══════════════════════════════════════════════════════════════
