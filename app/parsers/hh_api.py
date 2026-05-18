@@ -114,38 +114,42 @@ class HHApiClient:
                 return False
 
     async def fetch_applied_vacancy_ids(self) -> set[str]:
-        """Pull list of vacancy_ids the user already applied to (via negotiations API).
-        Used to pre-mark them in DB and skip re-attempts.
-        """
+        """Scrape /applicant/negotiations HTML for vacancy IDs the user
+        has already applied to. Walks pagination via ?page=N until empty."""
         if not self.reload_cookies():
             return set()
         ids: set[str] = set()
-        url = "https://hh.ru/shards/applicant/negotiations"
-        params = {"page": 0, "perPage": 50}
-        async with httpx.AsyncClient(cookies=self._cookies, headers=_headers(self._xsrf), timeout=20) as c:
-            for page in range(0, 10):  # up to 500 items
-                params["page"] = page
+        async with httpx.AsyncClient(
+            cookies=self._cookies,
+            headers=_headers(self._xsrf, accept_html=True),
+            timeout=25,
+        ) as c:
+            for page in range(0, 30):  # up to ~30 pages of negotiations
                 try:
-                    r = await c.get(url, params=params)
-                    if r.status_code != 200:
-                        break
-                    data = r.json()
+                    r = await c.get(
+                        "https://hh.ru/applicant/negotiations",
+                        params={"page": page},
+                        follow_redirects=True,
+                    )
                 except Exception as e:
                     log.warning("hh_api_fetch_applied_error", error=str(e), page=page)
                     break
-                items = data.get("topicsList", []) or data.get("items", []) or []
-                if not items:
+                if r.status_code not in (200, 406):
                     break
-                for it in items:
-                    vid = (
-                        it.get("vacancyId")
-                        or it.get("vacancy", {}).get("@id")
-                        or it.get("vacancy", {}).get("id")
-                    )
-                    if vid:
-                        ids.add(str(vid))
-                # if less than perPage — last page
-                if len(items) < params["perPage"]:
+                body = r.text or ""
+                if not body:
+                    break
+                # Extract vacancy IDs from URLs in markup
+                page_ids = set(re.findall(r"/vacancy/(\d+)", body))
+                # Filter out IDs that may appear in nav/recommendations
+                # (these usually appear in /vacancy/ links inside negotiation cards)
+                new_ids = page_ids - ids
+                if not new_ids and page > 0:
+                    # No new ids on this page → end
+                    break
+                ids |= page_ids
+                # No pagination marker — break if page got generic markup
+                if len(page_ids) < 5 and page > 0:
                     break
         log.info("hh_api_fetched_applied_ids", count=len(ids))
         return ids
