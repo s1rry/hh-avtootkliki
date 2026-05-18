@@ -56,14 +56,33 @@ class ClaudeAI:
         self._save_use_fallback()
         log.info("ai_fallback_reset")
 
+    def _extract_text(self, response) -> str:
+        """Pull text from response.content[], skipping empty/thinking blocks.
+        TonWave with low max_tokens can return content=[] if all budget
+        was spent on internal thinking — we'd previously crash with IndexError.
+        """
+        try:
+            blocks = list(response.content or [])
+        except Exception:
+            blocks = []
+        for b in blocks:
+            text = getattr(b, "text", None)
+            if text:
+                return text
+        return ""
+
     async def _call(self, system: str, user_message: str, max_tokens: int = 1024) -> tuple[str, int, int]:
+        # Minimum sane budget — small max_tokens makes models return empty content
+        if max_tokens < 800:
+            max_tokens = 800
+
         # Permanent fallback: if primary was exhausted before, go straight to fallback.
         if self.use_fallback and self.fallback:
             response = await self.fallback.messages.create(
                 model=MODEL, max_tokens=max_tokens, system=system,
                 messages=[{"role": "user", "content": user_message}],
             )
-            text = response.content[0].text
+            text = self._extract_text(response)
             return text, response.usage.input_tokens, response.usage.output_tokens
 
         try:
@@ -71,7 +90,7 @@ class ClaudeAI:
                 model=MODEL, max_tokens=max_tokens, system=system,
                 messages=[{"role": "user", "content": user_message}],
             )
-            text = response.content[0].text
+            text = self._extract_text(response)
             return text, response.usage.input_tokens, response.usage.output_tokens
         except Exception as e:
             err_str = str(e)
@@ -84,7 +103,7 @@ class ClaudeAI:
                     model=MODEL, max_tokens=max_tokens, system=system,
                     messages=[{"role": "user", "content": user_message}],
                 )
-                text = response.content[0].text
+                text = self._extract_text(response)
                 return text, response.usage.input_tokens, response.usage.output_tokens
             raise
 

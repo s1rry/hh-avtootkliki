@@ -136,11 +136,24 @@ async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
                         hh_api_client.apply(vid, letter),
                         timeout=20,
                     )
-                    if result is not True and result != "already":
-                        log.warning("hh_api_apply_failed", vacancy_id=vacancy.id, info=info)
                 except asyncio.TimeoutError:
                     log.error("hh_api_apply_timeout", vacancy_id=vacancy.id)
-                    result = False
+                    result, info = False, {"error": "timeout"}
+
+                # Fallback to Playwright if vacancy requires test/questionnaire
+                if result is False and isinstance(info, dict) and info.get("error") == "needs_test":
+                    log.info("hh_fallback_playwright_for_test", vacancy_id=vacancy.id)
+                    parser = HHParser()
+                    try:
+                        await asyncio.wait_for(parser.login(), timeout=60)
+                        result = await asyncio.wait_for(
+                            parser.apply_to_vacancy(vacancy.url, letter),
+                            timeout=180,
+                        )
+                    except asyncio.TimeoutError:
+                        result = False
+                elif result is not True and result != "already":
+                    log.warning("hh_api_apply_failed", vacancy_id=vacancy.id, info=info)
             elif vacancy.platform == "habr":
                 from app.parsers.habr import HabrParser
                 parser = HabrParser()

@@ -939,6 +939,19 @@ async def cmd_test_apply(message: Message, **kw):
         except _async.TimeoutError:
             res, info = False, {"error": "timeout"}
 
+        # Fallback to Playwright if questionnaire required
+        if res is False and isinstance(info, dict) and info.get("error") == "needs_test":
+            await message.answer(f"🔄 [{tag}] Опросник — переключаюсь на Playwright (медленнее)…")
+            from app.parsers.hh import HHParser
+            parser = HHParser()
+            try:
+                await _async.wait_for(parser.login(), timeout=60)
+                res = await _async.wait_for(parser.apply_to_vacancy(v.url, letter), timeout=180)
+                info = {"path": "playwright"}
+            except _async.TimeoutError:
+                res = False
+                info = {"error": "playwright_timeout"}
+
         # Result message
         status_emoji = "✅" if res is True else ("ℹ️" if res == "already" else "❌")
         result_label = {True: "ОТПРАВЛЕНО", "already": "Уже откликались", False: "ОШИБКА"}.get(res, "ОШИБКА")
