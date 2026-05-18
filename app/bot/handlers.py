@@ -947,10 +947,13 @@ async def cmd_test_apply(message: Message, **kw):
             try:
                 await _async.wait_for(parser.login(), timeout=60)
                 res = await _async.wait_for(parser.apply_to_vacancy(v.url, letter), timeout=180)
-                info = {"path": "playwright"}
+                info = {"path": "playwright", "result": str(res)}
             except _async.TimeoutError:
                 res = False
                 info = {"error": "playwright_timeout"}
+            except Exception as e:
+                res = False
+                info = {"error": f"playwright_err: {str(e)[:100]}"}
 
         # Result message
         status_emoji = "✅" if res is True else ("ℹ️" if res == "already" else "❌")

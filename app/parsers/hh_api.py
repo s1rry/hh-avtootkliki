@@ -169,19 +169,21 @@ class HHApiClient:
             return False, {"error": "HH_RESUME_ID not set in .env"}
 
         url = "https://hh.ru/applicant/vacancy_response/popup"
-        form = {
-            "resume_hash": rhash,
-            "vacancy_id": str(vacancy_id),
-            "letterRequired": "true",
-            "letter": _randomize_letter(cover_letter or ""),
-            "lux": "true",
-            "ignore_postponed": "true",
-        }
+        # HH expects multipart/form-data, not urlencoded — use httpx files API
+        # with str values to get multipart encoding without file upload semantics
+        fields = [
+            ("resume_hash", (None, rhash)),
+            ("vacancy_id", (None, str(vacancy_id))),
+            ("letterRequired", (None, "true")),
+            ("letter", (None, _randomize_letter(cover_letter or ""))),
+            ("lux", (None, "true")),
+            ("ignore_postponed", (None, "true")),
+        ]
         headers = _headers(self._xsrf)
         headers["Referer"] = f"https://hh.ru/vacancy/{vacancy_id}"
         async with httpx.AsyncClient(cookies=self._cookies, headers=headers, timeout=20) as c:
             try:
-                r = await c.post(url, data=form)
+                r = await c.post(url, files=fields)
             except httpx.RequestError as e:
                 return False, {"error": f"http: {e}"}
 
