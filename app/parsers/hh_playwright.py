@@ -441,6 +441,114 @@ class HHPlaywright:
                     question_textareas.append(ta)
         log.info("hh_question_textareas_found", count=len(question_textareas))
 
+        # 1b. Radio-button questions (multiple choice)
+        try:
+            radio_groups = await page.evaluate(
+                """() => {
+                    // Find all radio inputs grouped by name
+                    const radios = document.querySelectorAll('input[type=radio]');
+                    const groups = {};
+                    for (const r of radios) {
+                        if (r.offsetParent === null && (r.closest('[hidden]') || r.style.display === 'none')) continue;
+                        const name = r.name || r.getAttribute('data-qa') || 'unknown';
+                        if (!groups[name]) groups[name] = {options: [], question: ''};
+                        // Try to find label text
+                        let labelText = '';
+                        const id = r.id;
+                        if (id) {
+                            const lbl = document.querySelector(`label[for="${id}"]`);
+                            if (lbl) labelText = (lbl.innerText || '').trim();
+                        }
+                        if (!labelText && r.parentElement) {
+                            labelText = (r.parentElement.innerText || '').trim();
+                        }
+                        groups[name].options.push({value: r.value, label: labelText, id: id});
+                    }
+                    // Try to find the question text for each group
+                    for (const name in groups) {
+                        const first = document.querySelector(`input[type=radio][name="${name}"]`);
+                        if (!first) continue;
+                        let cur = first;
+                        for (let i = 0; i < 8; i++) {
+                            if (!cur.parentElement) break;
+                            cur = cur.parentElement;
+                            const text = (cur.innerText || '').split('\\n')[0].trim();
+                            if (text && text.length > 5 && text.length < 200 && text.endsWith('?')) {
+                                groups[name].question = text;
+                                break;
+                            }
+                        }
+                    }
+                    return groups;
+                }"""
+            )
+            if radio_groups:
+                from app.ai.claude import claude_ai as _ai
+                for grp_name, grp in radio_groups.items():
+                    options = grp.get("options", [])
+                    question = grp.get("question", "") or grp_name
+                    if not options:
+                        continue
+                    log.info("hh_radio_question", question=question[:120], opts=[o["label"][:30] for o in options])
+
+                    # Smart defaults — avoid AI call for obvious cases
+                    chosen_idx = None
+                    labels_lc = [o["label"].lower() for o in options]
+                    # "все варианты подходят" / "any" — pick if present
+                    for i, lbl in enumerate(labels_lc):
+                        if "все" in lbl and ("вариант" in lbl or "подход" in lbl):
+                            chosen_idx = i
+                            break
+                    # If "удалён" in any option and remote-friendly resume → that one
+                    if chosen_idx is None:
+                        for i, lbl in enumerate(labels_lc):
+                            if "удал" in lbl or "remote" in lbl:
+                                chosen_idx = i
+                                break
+
+                    # AI fallback for non-trivial choices
+                    if chosen_idx is None and len(options) > 1:
+                        opt_lines = "\n".join(f"{i+1}. {o['label']}" for i, o in enumerate(options))
+                        ai_user = (
+                            f"Вопрос работодателя: {question}\n\n"
+                            f"Варианты:\n{opt_lines}\n\n"
+                            "Выбери ОДИН вариант, который наиболее подходит кандидату. "
+                            "Ответь ТОЛЬКО номером варианта (просто цифрой)."
+                        )
+                        ai_system = (
+                            "Ты — кандидат, выбирающий ответ на вопрос работодателя. "
+                            "Кандидат проживает в Егорьевске (МО), готов работать удалённо или ездить в Москву. "
+                            "Желаемая зарплата от 150-200 тыс. рублей. Уровень — middle.\n\n"
+                            f"Профиль:\n{cfg.resume_text[:1500]}"
+                        )
+                        try:
+                            ai_resp, _, _ = await _ai._call(ai_system, ai_user, max_tokens=20)
+                            m = re.search(r"\d+", ai_resp)
+                            if m:
+                                idx = int(m.group(0)) - 1
+                                if 0 <= idx < len(options):
+                                    chosen_idx = idx
+                        except Exception as e:
+                            log.warning("hh_radio_ai_error", error=str(e))
+
+                    if chosen_idx is None:
+                        chosen_idx = 0  # fallback to first
+
+                    chosen = options[chosen_idx]
+                    log.info("hh_radio_chosen", question=question[:60], pick=chosen["label"][:40])
+                    # Click the radio
+                    try:
+                        if chosen.get("id"):
+                            sel = f'input[type=radio]#{chosen["id"]}'
+                        else:
+                            sel = f'input[type=radio][name="{grp_name}"][value="{chosen["value"]}"]'
+                        await page.check(sel)
+                        await page.wait_for_timeout(300)
+                    except Exception as e:
+                        log.warning("hh_radio_click_error", error=str(e))
+        except Exception as e:
+            log.warning("hh_radio_processing_error", error=str(e))
+
         for ta in question_textareas:
             try:
                 # Extract question text — closest preceding label or paragraph
@@ -476,7 +584,10 @@ class HHPlaywright:
                     "Дай чёткий короткий ответ от первого лица (2-4 предложения максимум). "
                     "Используй факты из моего резюме, не выдумывай. "
                     "Если это тестовое задание — выполни его. "
-                    "Если спрашивают про зарплату — укажи от 200 000 руб. "
+                    "Если спрашивают про зарплату — укажи от 150 000 руб. "
+                    "Если спрашивают про местоположение — г. Егорьевск Московской области, "
+                    "готов на удалёнку или поездки в Москву. "
+                    "Если спрашивают про военный билет — имеется. "
                     "Если спрашивают про команду — отвечай исходя из проектов в резюме."
                 )
                 system = (
