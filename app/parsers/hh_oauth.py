@@ -110,53 +110,54 @@ class HHOAuth:
             )
             captured = {"code": None}
 
-            # Intercept the redirect to hhandroid://
-            async def on_request(req):
-                u = req.url
-                if "hhandroid://" in u or "code=" in u:
-                    m = re.search(r"code=([^&]+)", u)
-                    if m and not captured["code"]:
-                        captured["code"] = m.group(1)
+            # Intercept ANY request/response containing the auth code
+            def _check(url: str):
+                if not url or captured["code"]:
+                    return
+                mm = re.search(r"code=([^&\s]+)", url)
+                if mm:
+                    captured["code"] = mm.group(1)
 
-            page.on("request", lambda req: on_request(req))
+            page.on("request", lambda req: _check(req.url))
+            page.on("response", lambda resp: _check(resp.url))
+            page.on("framenavigated", lambda f: _check(f.url))
 
             try:
                 await page.goto(authorize_url, wait_until="domcontentloaded", timeout=20000)
             except Exception:
-                # The redirect to hhandroid:// will fail navigation — that's expected
-                pass
+                pass  # hhandroid:// will fail navigation
 
-            # If approve form appears, click "Разрешить"
             await page.wait_for_timeout(2000)
+
+            # Click "Продолжить" / "Разрешить" / "Подтвердить"
             try:
-                if page.url.startswith("https://hh.ru/oauth/"):
+                approve = await page.query_selector('[data-qa="oauth-grant-allow"]')
+                if not approve:
                     approve = await page.query_selector(
-                        'button[data-qa="oauth-grant-button"], button:has-text("Разрешить"), button:has-text("Подтвердить")'
+                        'button:has-text("Продолжить"), button:has-text("Разрешить"), button:has-text("Подтвердить"), button[data-qa*="oauth-grant"]'
                     )
-                    if approve:
+                if approve:
+                    log.info("oauth_clicking_approve")
+                    try:
                         await approve.click()
-                        await page.wait_for_timeout(3000)
+                    except Exception:
+                        # Click might fail due to navigation — that's fine
+                        pass
+                    await page.wait_for_timeout(3000)
             except Exception as e:
-                log.debug("oauth_approve_skip", error=str(e))
+                log.warning("oauth_approve_error", error=str(e))
 
-            # Code might already be captured via redirect intercept
-            if captured["code"]:
-                try:
-                    await page.close()
-                except Exception:
-                    pass
-                return captured["code"]
+            # Wait a bit more for redirect listeners to fire
+            await page.wait_for_timeout(1500)
 
-            # Fallback: check final URL
-            final = page.url
-            m = re.search(r"code=([^&]+)", final)
             try:
                 await page.close()
             except Exception:
                 pass
-            if m:
-                return m.group(1)
-            log.error("oauth_no_code_playwright", final=final[:200])
+
+            if captured["code"]:
+                return captured["code"]
+            log.error("oauth_no_code_playwright_final", url=authorize_url[:100])
             return None
         except Exception as e:
             log.error("oauth_playwright_error", error=str(e))
