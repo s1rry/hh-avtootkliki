@@ -124,18 +124,35 @@ async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
                 ))
                 await session.commit()
 
-            # HH через Playwright (DDoS Guard блокирует прямой API POST)
+            # HH через OAuth API (быстро, обходит DDoS Guard)
             result = False
             if vacancy.platform == "hh":
-                parser = HHParser()
+                from app.parsers.hh_oauth import hh_oauth
+                m_id = re.search(r"/vacancy/(\d+)", vacancy.url)
+                vid = m_id.group(1) if m_id else vacancy.external_id
                 try:
-                    await asyncio.wait_for(parser.login(), timeout=60)
-                    result = await asyncio.wait_for(
-                        parser.apply_to_vacancy(vacancy.url, letter),
-                        timeout=180,
+                    res, info = await asyncio.wait_for(
+                        hh_oauth.apply(vid, letter),
+                        timeout=20,
                     )
+                    result = res
+                    if res is not True and res != "already":
+                        log.warning("hh_oauth_failed", vacancy_id=vacancy.id, info=info)
+                        # Fallback to Playwright only on quota / needs_test
+                        err = (info or {}).get("error", "")
+                        if err == "needs_test":
+                            log.info("hh_fallback_playwright_for_test", vacancy_id=vacancy.id)
+                            parser = HHParser()
+                            try:
+                                await asyncio.wait_for(parser.login(), timeout=60)
+                                result = await asyncio.wait_for(
+                                    parser.apply_to_vacancy(vacancy.url, letter),
+                                    timeout=180,
+                                )
+                            except asyncio.TimeoutError:
+                                result = False
                 except asyncio.TimeoutError:
-                    log.error("hh_apply_timeout", vacancy_id=vacancy.id)
+                    log.error("hh_oauth_timeout", vacancy_id=vacancy.id)
                     result = False
             elif vacancy.platform == "habr":
                 from app.parsers.habr import HabrParser

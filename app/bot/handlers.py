@@ -902,12 +902,11 @@ async def cmd_test_apply(message: Message, **kw):
         await message.answer("❌ Нет одобренных вакансий hh для теста")
         return
 
-    from app.parsers.hh import HHParser
+    from app.parsers.hh_oauth import hh_oauth
     from app.parsers.hh_api import hh_api_client
     from app.ai.claude import claude_ai
     import asyncio as _async
-    from pathlib import Path
-    from aiogram.types import FSInputFile
+    import re as _re
     from app.utils.anti_detect import random_delay
     from app.models.application import Application, ApplicationStatus
 
@@ -917,15 +916,10 @@ async def cmd_test_apply(message: Message, **kw):
     if marked:
         await message.answer(f"🔄 Помечено уже-откликнутых: {marked}. Беру новые.")
 
-    if not await hh_api_client.is_logged_in():
-        await message.answer("❌ hh.ru: сессия слетела. Нужен VNC-логин.")
-        return
-
-    parser = HHParser()
-    try:
-        await _async.wait_for(parser.login(), timeout=60)
-    except _async.TimeoutError:
-        await message.answer("❌ Playwright login timeout")
+    # Verify OAuth token works
+    token = await hh_oauth.get_token()
+    if not token:
+        await message.answer("❌ Не удалось получить OAuth токен. Нужен VNC-логин в hh.")
         return
 
     stats = {"sent": 0, "already": 0, "failed": 0}
@@ -943,29 +937,23 @@ async def cmd_test_apply(message: Message, **kw):
             stats["failed"] += 1
             continue
 
+        m_id = _re.search(r"/vacancy/(\d+)", v.url)
+        vid = m_id.group(1) if m_id else v.external_id
         try:
-            res = await _async.wait_for(
-                parser.apply_to_vacancy(v.url, letter, screenshot_name=tag),
-                timeout=180,
-            )
+            res, info = await _async.wait_for(hh_oauth.apply(vid, letter), timeout=20)
         except _async.TimeoutError:
-            res = False
+            res, info = False, {"error": "timeout"}
 
         status_emoji = "✅" if res is True else ("ℹ️" if res == "already" else "❌")
         result_label = {True: "ОТПРАВЛЕНО", "already": "Уже откликались", False: "ОШИБКА"}.get(res, "ОШИБКА")
         info_str = ""
+        if res is not True and info:
+            short = str(info)[:200]
+            info_str = f"\n<i>{short}</i>"
         await message.answer(
             f"{status_emoji} <b>[{tag}]</b> {result_label}\n🔗 {v.url}{info_str}",
             parse_mode="HTML",
         )
-        # Send screenshots
-        for stage in ("before", "after"):
-            sp = Path(f"data/test_apply_{tag}_{stage}.png")
-            if sp.exists():
-                try:
-                    await message.answer_photo(FSInputFile(sp), caption=f"[{tag}] {stage}")
-                except Exception:
-                    pass
 
         if res is True:
             stats["sent"] += 1
