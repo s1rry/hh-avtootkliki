@@ -137,8 +137,6 @@ async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
                 except asyncio.TimeoutError:
                     log.error("hh_apply_timeout", vacancy_id=vacancy.id)
                     result = False
-                elif result is not True and result != "already":
-                    log.warning("hh_api_apply_failed", vacancy_id=vacancy.id, info=info)
             elif vacancy.platform == "habr":
                 from app.parsers.habr import HabrParser
                 parser = HabrParser()
