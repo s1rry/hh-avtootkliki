@@ -92,55 +92,83 @@ class HHOAuth:
             log.warning("oauth_refresh_error", error=str(e))
         return None
 
-    async def _authorize(self) -> dict | None:
-        """Full authorize flow using browser-session cookies."""
-        cookies = _load_hh_cookies()
-        if not cookies:
-            log.error("oauth_no_cookies")
+    async def _authorize_via_playwright(self) -> str | None:
+        """Get OAuth authorization code by navigating to the authorize URL
+        in a real Playwright browser. The browser intercepts the redirect to
+        hhandroid:// and we capture the `code` parameter."""
+        try:
+            from app.utils.browser import browser_manager
+        except ImportError:
+            log.error("oauth_no_playwright")
             return None
         try:
-            async with httpx.AsyncClient(timeout=15, verify=False, cookies=cookies, headers={"User-Agent": UA}) as c:
-                # Step 1: authorize, expect 302 to hhandroid:// with code
-                r1 = await c.get(
-                    "https://hh.ru/oauth/authorize",
-                    params={
-                        "response_type": "code",
-                        "client_id": CLIENT_ID,
-                        "redirect_uri": REDIRECT_URI,
-                        "state": "bot",
-                    },
-                    follow_redirects=False,
-                )
-                code = None
-                loc = r1.headers.get("location", "")
-                m = re.search(r"code=([^&]+)", loc)
-                if m:
-                    code = m.group(1)
-                if not code:
-                    # Need approve form submit
-                    text = r1.text or ""
-                    if r1.status_code == 200 and ("разрешить" in text.lower() or "approve" in text.lower()):
-                        r2 = await c.post(
-                            "https://hh.ru/oauth/authorize",
-                            data={
-                                "response_type": "code",
-                                "client_id": CLIENT_ID,
-                                "redirect_uri": REDIRECT_URI,
-                                "state": "bot",
-                                "action": "approve",
-                                "_xsrf": cookies.get("_xsrf", ""),
-                            },
-                            follow_redirects=False,
-                        )
-                        loc2 = r2.headers.get("location", "")
-                        m2 = re.search(r"code=([^&]+)", loc2)
-                        if m2:
-                            code = m2.group(1)
-                if not code:
-                    log.error("oauth_no_code", status=r1.status_code, location=loc[:200])
-                    return None
+            page = await browser_manager.new_page("hh")
+            authorize_url = (
+                "https://hh.ru/oauth/authorize?"
+                f"response_type=code&client_id={CLIENT_ID}"
+                f"&redirect_uri={REDIRECT_URI}&state=bot"
+            )
+            captured = {"code": None}
 
-                # Step 2: exchange for token
+            # Intercept the redirect to hhandroid://
+            async def on_request(req):
+                u = req.url
+                if "hhandroid://" in u or "code=" in u:
+                    m = re.search(r"code=([^&]+)", u)
+                    if m and not captured["code"]:
+                        captured["code"] = m.group(1)
+
+            page.on("request", lambda req: on_request(req))
+
+            try:
+                await page.goto(authorize_url, wait_until="domcontentloaded", timeout=20000)
+            except Exception:
+                # The redirect to hhandroid:// will fail navigation — that's expected
+                pass
+
+            # If approve form appears, click "Разрешить"
+            await page.wait_for_timeout(2000)
+            try:
+                if page.url.startswith("https://hh.ru/oauth/"):
+                    approve = await page.query_selector(
+                        'button[data-qa="oauth-grant-button"], button:has-text("Разрешить"), button:has-text("Подтвердить")'
+                    )
+                    if approve:
+                        await approve.click()
+                        await page.wait_for_timeout(3000)
+            except Exception as e:
+                log.debug("oauth_approve_skip", error=str(e))
+
+            # Code might already be captured via redirect intercept
+            if captured["code"]:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+                return captured["code"]
+
+            # Fallback: check final URL
+            final = page.url
+            m = re.search(r"code=([^&]+)", final)
+            try:
+                await page.close()
+            except Exception:
+                pass
+            if m:
+                return m.group(1)
+            log.error("oauth_no_code_playwright", final=final[:200])
+            return None
+        except Exception as e:
+            log.error("oauth_playwright_error", error=str(e))
+            return None
+
+    async def _authorize(self) -> dict | None:
+        """Get OAuth token: authorize via Playwright + token exchange via httpx."""
+        code = await self._authorize_via_playwright()
+        if not code:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=15, verify=False) as c:
                 r3 = await c.post(
                     "https://hh.ru/oauth/token",
                     data={
@@ -155,16 +183,16 @@ class HHOAuth:
                         "Content-Type": "application/x-www-form-urlencoded",
                     },
                 )
-                if r3.status_code == 200:
-                    d = r3.json()
-                    token = {
-                        "access_token": d["access_token"],
-                        "refresh_token": d.get("refresh_token", ""),
-                        "expires_at": time.time() + d.get("expires_in", 1209599),
-                    }
-                    log.info("oauth_authorize_success", expires_in=d.get("expires_in"))
-                    return token
-                log.error("oauth_token_exchange_failed", status=r3.status_code, body=r3.text[:200])
+            if r3.status_code == 200:
+                d = r3.json()
+                token = {
+                    "access_token": d["access_token"],
+                    "refresh_token": d.get("refresh_token", ""),
+                    "expires_at": time.time() + d.get("expires_in", 1209599),
+                }
+                log.info("oauth_authorize_success", expires_in=d.get("expires_in"))
+                return token
+            log.error("oauth_token_exchange_failed", status=r3.status_code, body=r3.text[:200])
         except Exception as e:
             log.error("oauth_authorize_error", error=str(e))
         return None
