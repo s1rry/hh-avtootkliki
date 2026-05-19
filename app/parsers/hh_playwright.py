@@ -208,22 +208,85 @@ class HHPlaywright:
             if not await self.login():
                 return False
 
+        # If the cached page is closed/crashed, recreate it
+        if self._page and self._page.is_closed():
+            self._page = None
         page = await self._get_page()
 
         try:
-            await page.goto(vacancy_url, wait_until="domcontentloaded", timeout=45000)
+            try:
+                await page.goto(vacancy_url, wait_until="domcontentloaded", timeout=45000)
+            except Exception as nav_err:
+                # Page may have crashed — recreate and retry once
+                err_str = str(nav_err)
+                if "Target page" in err_str or "frame was detached" in err_str or "ERR_ABORTED" in err_str:
+                    log.warning("hh_apply_page_recover", error=err_str[:100])
+                    try:
+                        if self._page and not self._page.is_closed():
+                            await self._page.close()
+                    except Exception:
+                        pass
+                    self._page = None
+                    page = await self._get_page()
+                    await page.goto(vacancy_url, wait_until="domcontentloaded", timeout=45000)
+                else:
+                    raise
             await random_delay(2, 4)
 
             # If hh redirected to /applicant/vacancy_response — skip clicking apply
             if "/applicant/vacancy_response" not in page.url:
-                apply_btn = await page.query_selector('[data-qa="vacancy-response-link-top"]')
+                # Try multiple selectors and JS text-search as fallback
+                apply_btn = None
+                for sel in (
+                    '[data-qa="vacancy-response-link-top"]',
+                    '[data-qa="vacancy-response-link-bottom"]',
+                    'a[data-qa*="vacancy-response-link"]',
+                    'button[data-qa*="vacancy-response"]',
+                    'a[href*="/applicant/vacancy_response"]',
+                ):
+                    apply_btn = await page.query_selector(sel)
+                    if apply_btn and await apply_btn.is_visible():
+                        break
+                    apply_btn = None
                 if not apply_btn:
-                    apply_btn = await page.query_selector('[data-qa="vacancy-response-link-bottom"]')
+                    # JS text-search as last resort
+                    handle = await page.evaluate_handle(
+                        """() => {
+                            const all = document.querySelectorAll('a, button');
+                            for (const el of all) {
+                                const t = (el.innerText || '').trim().toLowerCase();
+                                if (t === 'откликнуться' && el.offsetParent !== null) return el;
+                            }
+                            return null;
+                        }"""
+                    )
+                    if await handle.evaluate("el => !!el"):
+                        apply_btn = handle.as_element()
+
                 if not apply_btn:
-                    applied_el = await page.query_selector('[data-qa="vacancy-response-link-view-topic"]')
-                    if applied_el:
-                        await self._save_debug_screenshot(page, "already_applied")
-                        log.info("hh_already_applied", url=vacancy_url)
+                    # Already applied check
+                    for sel in (
+                        '[data-qa="vacancy-response-link-view-topic"]',
+                        'a[href*="/applicant/negotiations/topic"]',
+                    ):
+                        applied_el = await page.query_selector(sel)
+                        if applied_el:
+                            await self._save_debug_screenshot(page, "already_applied")
+                            log.info("hh_already_applied", url=vacancy_url)
+                            return "already"
+                    # Text-search "Перейти к переписке"
+                    has_already = await page.evaluate(
+                        """() => {
+                            const all = document.querySelectorAll('a, button');
+                            for (const el of all) {
+                                const t = (el.innerText || '').trim().toLowerCase();
+                                if (t.includes('перейти к переписке') || t.includes('вы уже откликались')) return true;
+                            }
+                            return false;
+                        }"""
+                    )
+                    if has_already:
+                        log.info("hh_already_applied_text", url=vacancy_url)
                         return "already"
                     await self._save_debug_screenshot(page, "apply_no_btn")
                     log.warning("hh_apply_btn_not_found", url=vacancy_url, page_url=page.url)
