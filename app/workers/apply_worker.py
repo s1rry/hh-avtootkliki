@@ -124,34 +124,19 @@ async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
                 ))
                 await session.commit()
 
-            # Fast path: HH через прямой API (~1 сек вместо ~60 сек Playwright)
+            # HH через Playwright (DDoS Guard блокирует прямой API POST)
             result = False
             if vacancy.platform == "hh":
-                from app.parsers.hh_api import hh_api_client
-                # Extract numeric vacancy id from URL
-                m = re.search(r"/vacancy/(\d+)", vacancy.url)
-                vid = m.group(1) if m else vacancy.external_id
+                parser = HHParser()
                 try:
-                    result, info = await asyncio.wait_for(
-                        hh_api_client.apply(vid, letter),
-                        timeout=20,
+                    await asyncio.wait_for(parser.login(), timeout=60)
+                    result = await asyncio.wait_for(
+                        parser.apply_to_vacancy(vacancy.url, letter),
+                        timeout=180,
                     )
                 except asyncio.TimeoutError:
-                    log.error("hh_api_apply_timeout", vacancy_id=vacancy.id)
-                    result, info = False, {"error": "timeout"}
-
-                # Fallback to Playwright if vacancy requires test/questionnaire
-                if result is False and isinstance(info, dict) and info.get("error") == "needs_test":
-                    log.info("hh_fallback_playwright_for_test", vacancy_id=vacancy.id)
-                    parser = HHParser()
-                    try:
-                        await asyncio.wait_for(parser.login(), timeout=60)
-                        result = await asyncio.wait_for(
-                            parser.apply_to_vacancy(vacancy.url, letter),
-                            timeout=180,
-                        )
-                    except asyncio.TimeoutError:
-                        result = False
+                    log.error("hh_apply_timeout", vacancy_id=vacancy.id)
+                    result = False
                 elif result is not True and result != "already":
                     log.warning("hh_api_apply_failed", vacancy_id=vacancy.id, info=info)
             elif vacancy.platform == "habr":
