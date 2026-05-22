@@ -46,11 +46,27 @@ async def sync_applied_from_hh() -> int:
 
 async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
     log.info("auto_apply_started", auto_mode=auto_mode, min_score=min_score)
-    # Pre-sync from HH negotiations to skip already-applied vacancies
+
+    # Платформы на паузе (из scheduler_state.json) — для них пропускаем
+    # выборку. Объединяем auto-pause (login_health) и manual-pause (юзер).
+    paused_platforms: set[str] = set()
     try:
-        await sync_applied_from_hh()
+        import json as _json
+        from pathlib import Path as _Path
+        _sf = _Path("data/scheduler_state.json")
+        if _sf.exists():
+            _st = _json.loads(_sf.read_text())
+            paused_platforms = set(_st.get("paused_platforms", []))
+            paused_platforms |= set(_st.get("manual_paused_platforms", []))
     except Exception as e:
-        log.warning("sync_applied_skip", error=str(e))
+        log.warning("read_paused_platforms_error", error=str(e))
+
+    # Pre-sync from HH negotiations to skip already-applied vacancies (только если hh не на паузе)
+    if "hh" not in paused_platforms:
+        try:
+            await sync_applied_from_hh()
+        except Exception as e:
+            log.warning("sync_applied_skip", error=str(e))
     applied = 0
 
     # Per-platform daily limits
@@ -58,6 +74,11 @@ async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
         "hh": settings.max_applies_per_day_hh,
         "habr": settings.max_applies_per_day_habr,
     }
+    # Платформы на паузе исключаем целиком
+    for p in list(platform_caps.keys()):
+        if p in paused_platforms:
+            log.info("apply_skip_paused_platform", platform=p)
+            del platform_caps[p]
     async with async_session() as session:
         today_rows = (await session.execute(
             select(Application.platform, func.count(Application.id))
@@ -116,12 +137,21 @@ async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
         "Контакты: i.egorov8080@gmail.com, tg @egorov_analyst"
     )
 
+    # Глобальные ошибки (daily_limit, истёкший токен, нет резюме) одинаково
+    # бьют по всем вакансиям платформы — нет смысла ретраить и засорять БД
+    # фейлами. Прерываем платформу до следующего запуска.
+    aborted_platforms: set[str] = set()
+    GLOBAL_ERRORS = {"daily_limit", "auth_required", "auth_expired", "no_oauth_token", "no_resume_id"}
+
     for vacancy in vacancies:
+        if vacancy.platform in aborted_platforms:
+            continue
         try:
             letter = STATIC_LETTER
 
             # HH через OAuth API (быстро, обходит DDoS Guard)
             result = False
+            skip_record = False  # True для глобальных ошибок — не пишем FAILED
             if vacancy.platform == "hh":
                 from app.parsers.hh_oauth import hh_oauth
                 m_id = re.search(r"/vacancy/(\d+)", vacancy.url)
@@ -133,9 +163,18 @@ async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
                     )
                     result = res
                     if res is not True and res != "already":
-                        log.warning("hh_oauth_failed", vacancy_id=vacancy.id, info=info)
+                        err = ((info or {}).get("error", "") or "").lower()
+                        if err in GLOBAL_ERRORS:
+                            log.warning(
+                                "hh_apply_run_aborted",
+                                reason=err,
+                                vacancy_id=vacancy.id,
+                            )
+                            aborted_platforms.add(vacancy.platform)
+                            skip_record = True
+                        else:
+                            log.warning("hh_oauth_failed", vacancy_id=vacancy.id, info=info)
                         # Fallback to Playwright only on quota / needs_test
-                        err = (info or {}).get("error", "")
                         if err == "needs_test":
                             log.info("hh_fallback_playwright_for_test", vacancy_id=vacancy.id)
                             # Vacancy has questionnaire — generate AI letter (it's worth tokens here)
@@ -174,14 +213,21 @@ async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
                 from app.parsers.habr import HabrParser
                 parser = HabrParser()
                 try:
-                    await asyncio.wait_for(parser.login(), timeout=60)
+                    await asyncio.wait_for(parser.login(), timeout=30)
+                    # Habr apply: ограничиваем сверху 15с (по запросу пользователя).
+                    # Если за 15с не отозвалось — пропускаем вакансию, идём дальше.
                     result = await asyncio.wait_for(
                         parser.apply_to_vacancy(vacancy.url, letter),
-                        timeout=120,
+                        timeout=15,
                     )
                 except asyncio.TimeoutError:
                     log.error("apply_timeout_global", vacancy_id=vacancy.id, url=vacancy.url)
                     result = False
+
+            if skip_record:
+                # Глобальная ошибка платформы — не пишем фейк-FAILED, идём дальше.
+                # Цикл пропустит остальные вакансии этой платформы через aborted_platforms.
+                continue
 
             success = result is True  # True != "already"
             already = result == "already"
@@ -214,7 +260,11 @@ async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
                 success=success,
             )
 
-            await random_delay(settings.apply_delay_min, settings.apply_delay_max)
+            # Habr — фиксированная задержка 11с. HH — рандом из настроек (3-12с).
+            if vacancy.platform == "habr":
+                await asyncio.sleep(11)
+            else:
+                await random_delay(settings.apply_delay_min, settings.apply_delay_max)
 
         except Exception as e:
             log.error("apply_error", vacancy_id=vacancy.id, error=str(e))

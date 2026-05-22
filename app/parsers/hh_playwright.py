@@ -235,14 +235,20 @@ class HHPlaywright:
 
             # Check page-level access restrictions first
             page_text_check = await page.evaluate(
-                """() => (document.body.innerText || '').slice(0, 1000).toLowerCase()"""
+                """() => (document.body.innerText || '').slice(0, 5000).toLowerCase()"""
             )
-            if "вам недоступна эта вакансия" in page_text_check or "вакансия скрыта" in page_text_check:
+            _HIDDEN_PATTERNS = (
+                "вам недоступна эта вакансия", "вакансия скрыта",
+                "вакансия не найдена", "vacancy not found",
+                "эта вакансия недоступна", "вакансия недоступна",
+                "вакансия закрыта", "вакансия снята с публикации",
+                "скрыта от вас", "скрыта работодателем",
+                "вакансия не активна", "вакансия не опубликована",
+                "данная вакансия недоступна",
+            )
+            if any(p in page_text_check for p in _HIDDEN_PATTERNS):
                 log.info("hh_vacancy_unavailable", url=vacancy_url)
                 return "already"  # Mark as APPLIED to skip forever
-            if "вакансия не найдена" in page_text_check or "vacancy not found" in page_text_check:
-                log.info("hh_vacancy_not_found", url=vacancy_url)
-                return "already"
             if "/account/login" in page.url:
                 log.error("hh_session_lost_on_vacancy", url=vacancy_url)
                 self._logged_in = False
@@ -303,6 +309,16 @@ class HHPlaywright:
                     if has_already:
                         log.info("hh_already_applied_text", url=vacancy_url)
                         return "already"
+                    # Full-page check — maybe the hidden-vacancy message is lower on the page
+                    try:
+                        full_text = await page.evaluate(
+                            """() => (document.body.innerText || '').toLowerCase()"""
+                        )
+                        if any(p in full_text for p in _HIDDEN_PATTERNS):
+                            log.info("hh_vacancy_hidden_late_detect", url=vacancy_url)
+                            return "already"
+                    except Exception:
+                        pass
                     await self._save_debug_screenshot(page, "apply_no_btn")
                     log.warning("hh_apply_btn_not_found", url=vacancy_url, page_url=page.url)
                     return False
@@ -315,15 +331,21 @@ class HHPlaywright:
                     pass
                 await page.wait_for_timeout(2000)
 
-            # Handle "Вы откликаетесь на вакансию в другой стране" modal
+            # Handle "Вы откликаетесь на вакансию в другой стране" / похожие модалки
             try:
                 clicked_anyway = await page.evaluate(
                     """() => {
-                        const buttons = document.querySelectorAll('button, a[role=button]');
+                        const _CONFIRM_TEXTS = new Set([
+                            'все равно откликнуться', 'всё равно откликнуться',
+                            'все равно', 'всё равно',
+                            'согласиться', 'согласен', 'соглашаюсь',
+                            'продолжить', 'подтвердить', 'ok', 'ок',
+                            'откликнуться всё равно', 'откликнуться все равно',
+                        ]);
+                        const buttons = document.querySelectorAll('button, a[role=button], [role=button]');
                         for (const b of buttons) {
                             const t = (b.innerText || '').trim().toLowerCase();
-                            if (t === 'все равно откликнуться' || t === 'всё равно откликнуться'
-                                || t === 'все равно' || t === 'всё равно') {
+                            if (_CONFIRM_TEXTS.has(t)) {
                                 b.click();
                                 return true;
                             }
@@ -361,14 +383,21 @@ class HHPlaywright:
                 await submit_btn.click()
                 await page.wait_for_timeout(1500)
 
-                # After submit also handle "foreign country" modal if appears here
+                # After submit also handle "foreign country" / confirm modals
                 try:
                     clicked_anyway_2 = await page.evaluate(
                         """() => {
-                            const buttons = document.querySelectorAll('button, a[role=button]');
+                            const _CONFIRM_TEXTS = new Set([
+                                'все равно откликнуться', 'всё равно откликнуться',
+                                'все равно', 'всё равно',
+                                'согласиться', 'согласен', 'соглашаюсь',
+                                'продолжить', 'подтвердить', 'ok', 'ок',
+                                'откликнуться всё равно', 'откликнуться все равно',
+                            ]);
+                            const buttons = document.querySelectorAll('button, a[role=button], [role=button]');
                             for (const b of buttons) {
                                 const t = (b.innerText || '').trim().toLowerCase();
-                                if (t === 'все равно откликнуться' || t === 'всё равно откликнуться') {
+                                if (_CONFIRM_TEXTS.has(t)) {
                                     b.click();
                                     return true;
                                 }
@@ -562,15 +591,16 @@ class HHPlaywright:
                         ai_system = (
                             "Ты — кандидат, выбирающий ответ на вопрос работодателя.\n"
                             "Профиль кандидата:\n"
-                            "- Проживает в Егорьевске (МО)\n"
-                            "- Готов работать удалённо, гибридно или ездить в Москву\n"
-                            "- Желаемая зарплата от 150 тыс. рублей\n"
-                            "- Уровень: middle BA/SA\n"
-                            "- К командировкам готов\n"
-                            "- Английский A2 (elementary)\n"
-                            "- Переезд возможен, готов обсуждать\n"
-                            "- Военный билет имеется\n\n"
-                            f"Резюме:\n{cfg.resume_text[:1200]}"
+                            "- Проживает в Москве\n"
+                            "- Готов работать удалённо, гибридно, формат разъездной приемлем\n"
+                            "- НЕ готов к переезду\n"
+                            "- К редким командировкам готов\n"
+                            "- Желаемая зарплата от 150 тыс. рублей на руки, готов обсуждать\n"
+                            "- Уровень: middle BA/SA, 3+ года в IT (общий стаж 11+ лет)\n"
+                            "- Английский B1 (Intermediate)\n"
+                            "- Опыт с платёжными системами (ЮKassa, Сбербанк, платёжные шлюзы),\n"
+                            "  1С-интеграциями, CRM, e-commerce, SaaS-подписочной моделью\n\n"
+                            f"Резюме:\n{cfg.resume_text[:1500]}"
                         )
                         try:
                             ai_resp, _, _ = await _ai._call(ai_system, ai_user, max_tokens=20)
@@ -642,19 +672,28 @@ class HHPlaywright:
                 "Если есть тестовое задание — выполни. "
                 "Готовые ответы для типовых вопросов:\n"
                 "  - Зарплата → от 150 000 руб на руки, готов обсуждать\n"
-                "  - Местоположение / РФ → г. Егорьевск Московской области, проживаю в РФ\n"
-                "  - Работа на территории заказчика в Москве → готов, регулярные поездки приемлемы\n"
-                "  - Военный билет → имеется\n"
-                "  - Командировки → готов\n"
-                "  - Английский → A2 (elementary), читаю документацию\n"
-                "  - Переезд → возможен, готов обсуждать\n"
-                "  - Когда выйдешь → 1-2 недели после оффера (рапорт + сдача дел)\n"
-                "  - Причина поиска → текущий проект в фазе поддержки, ищу более активную IT-роль\n"
-                "  - Что ближе BA/SA → системный аналитик ближе, но равно комфортно в BA\n"
-                "  - Документы (ТЗ, ЧТЗ, ПМИ, ПЗ) → ТЗ, ЧТЗ — постоянно, ПМИ и ПЗ — реже\n"
-                "  - Опыт REST/SOAP → REST постоянно (договоры API, Swagger), SOAP реже\n"
-                "  - Приёмо-сдаточные испытания → несколько раз, проводил UAT с заказчиком\n"
-                "  - Внешние заказчики → сбор требований через интервью и анкетирование\n\n"
+                "  - Местоположение / РФ → Москва, проживаю в РФ\n"
+                "  - Работа на территории заказчика в Москве → готов, разъездной формат приемлем\n"
+                "  - Переезд → НЕ готов к переезду\n"
+                "  - Командировки → готов к редким командировкам\n"
+                "  - Английский → B1 (Intermediate), читаю документацию, базовая переписка\n"
+                "  - Уровень → Middle BA/SA, в IT 3+ года, общий стаж 11+ лет\n"
+                "  - Текущее место → Технологии Нового Поколения, BA/SA, с марта 2023\n"
+                "  - Когда выйдешь → 2-4 недели после оффера (сдача дел на текущем проекте)\n"
+                "  - Причина поиска → ищу проект с большей зоной ответственности и развитием\n"
+                "  - Что ближе BA/SA → одинаково комфортно в обеих ролях, на текущем месте совмещаю\n"
+                "  - Документы (ТЗ, BRD, SRS, ЧТЗ) → ТЗ, BRD/SRS — регулярно; ЧТЗ — по необходимости\n"
+                "  - Опыт REST/SOAP → REST постоянно (проектирование, OpenAPI/Swagger, Postman), SOAP — редко\n"
+                "  - Опыт с платёжными системами → ДА, ЮKassa и Сбербанк (e-commerce), платёжные шлюзы (SaaS-подписки)\n"
+                "  - Опыт с 1С → интеграция (REST API для выгрузки каталога и заказов), не разработка внутри 1С\n"
+                "  - Опыт с CRM → проектирование интеграций, работа с CRM на проектах\n"
+                "  - Опыт с банками / финтех / процессингом → прямого опыта в банке нет; есть интеграции с платёжными провайдерами со стороны мерчанта\n"
+                "  - Опыт с Kafka / RabbitMQ → на уровне аналитика (асинхронные взаимодействия), глубокой настройки не делал\n"
+                "  - SQL → SELECT, JOIN, агрегации, оконные функции — уверенно; PostgreSQL, ClickHouse — базово\n"
+                "  - Agile / Scrum → работаю в Scrum-команде, грумминг, планирование, ретро\n"
+                "  - Метрики продукта → MAU/DAU, удержание, конверсия в подписку, средний чек, воронка заказов, A/B-тесты\n"
+                "  - Внешние заказчики → сбор требований через интервью, анкетирование, анализ документов\n"
+                "  - Приёмо-сдаточные испытания / UAT → проводил с заказчиком на e-commerce проекте\n\n"
                 "Ответь СТРОГО в формате JSON:\n"
                 "{\"1\": \"ответ 1\", \"2\": \"ответ 2\", ...}\n"
                 "Без markdown, без пояснений, только JSON."
@@ -682,15 +721,49 @@ class HHPlaywright:
             except Exception as e:
                 log.error("hh_batch_answer_error", error=str(e)[:200])
 
-        # Fill answers
+        # Fill answers. Используем page.fill() + stale-retry: ElementHandle
+        # из question_pairs могли протухнуть пока ждали AI-ответа (React
+        # перерисовывает форму). На retry пересобираем список textarea заново
+        # и берём по индексу.
+        async def _refind_question_textarea(target_idx: int):
+            fresh = await page.query_selector_all('textarea')
+            filt = []
+            for t in fresh:
+                try:
+                    if not await t.is_visible():
+                        continue
+                    ph = (await t.get_attribute('placeholder')) or ''
+                    dq = (await t.get_attribute('data-qa')) or ''
+                    nm = (await t.get_attribute('name')) or ''
+                    if 'letter' in dq.lower() or nm == 'text' or 'опровод' in ph.lower():
+                        continue
+                    filt.append(t)
+                except Exception:
+                    continue
+            return filt[target_idx] if target_idx < len(filt) else None
+
         for i, (ta, question) in enumerate(question_pairs):
             answer_text = answers_map.get(i + 1) or "Готов обсудить детали на собеседовании."
-            try:
-                await human_type(ta, answer_text, cfg.type_delay_min, cfg.type_delay_max)
-                await page.wait_for_timeout(400)
+            filled = False
+            for attempt in (1, 2):
+                el = ta if attempt == 1 else await _refind_question_textarea(i)
+                if el is None:
+                    break
+                try:
+                    await el.fill(answer_text)
+                    await page.wait_for_timeout(300)
+                    filled = True
+                    break
+                except Exception as e:
+                    msg = str(e).lower()
+                    if attempt == 1 and ("not attached" in msg or "detached" in msg or "no node" in msg):
+                        log.warning("hh_question_stale_retry", i=i + 1, error=str(e)[:80])
+                        await page.wait_for_timeout(500)
+                        continue
+                    log.warning("hh_question_fill_error", i=i + 1, error=str(e)[:120])
+                    break
+            if filled:
                 log.info("hh_question_answered", chars=len(answer_text), q=question[:60])
-            except Exception as e:
-                log.warning("hh_question_fill_error", error=str(e))
 
         # 2. Click "Добавить сопроводительное" link if textarea is hidden
         add_letter_btn = await page.query_selector('[data-qa="vacancy-response-letter-toggle"]')
@@ -748,12 +821,53 @@ class HHPlaywright:
             except Exception:
                 pass
 
-        if letter_area and cover_letter:
-            await human_type(letter_area, cover_letter, cfg.type_delay_min, cfg.type_delay_max)
-            await page.wait_for_timeout(800)
-            log.info("hh_letter_filled", chars=len(cover_letter))
-        elif cover_letter:
-            log.warning("hh_letter_area_not_found")
+        # Сопроводительное письмо: используем direct fill() с stale-retry.
+        # Раньше через human_type печаталось символ-за-символом ~1500 знаков
+        # * 30-120 мс = до 3 мин — за это время React успевал перерисовать
+        # textarea и хэндл протухал (ElementHandle.fill: not attached to DOM).
+        # hh.ru не делает bot-detection на содержимом формы отклика, поэтому
+        # мгновенный fill безопасен и устойчив.
+        async def _refind_letter():
+            for sel in (
+                '[data-qa="vacancy-response-popup-form-letter-input"]',
+                '[data-qa="cover-letter-input"]',
+                'textarea[name="text"]',
+                'textarea[name="letter"]',
+                'textarea[placeholder*="опроводительн"]',
+                'textarea[placeholder*="приветствие"]',
+                'textarea[placeholder*="расскажи"]',
+            ):
+                el = await page.query_selector(sel)
+                if el and await el.is_visible():
+                    return el
+            return None
+
+        if cover_letter:
+            filled = False
+            for attempt in (1, 2, 3):
+                el = letter_area if attempt == 1 else await _refind_letter()
+                if el is None:
+                    if attempt < 3:
+                        await page.wait_for_timeout(600)
+                        continue
+                    break
+                try:
+                    await el.fill(cover_letter)
+                    await page.wait_for_timeout(500)
+                    filled = True
+                    break
+                except Exception as e:
+                    msg = str(e).lower()
+                    if attempt < 3 and ("not attached" in msg or "detached" in msg or "no node" in msg):
+                        log.warning("hh_letter_stale_retry", attempt=attempt, error=str(e)[:80])
+                        await page.wait_for_timeout(700)
+                        continue
+                    log.warning("hh_letter_fill_error", error=str(e)[:120])
+                    break
+            if filled:
+                log.info("hh_letter_filled", chars=len(cover_letter))
+            else:
+                log.warning("hh_letter_fill_failed", chars=len(cover_letter))
 
         # 3. Resume picker (if multiple resumes)
         resume_select = await page.query_selector('[data-qa="vacancy-response-popup-form-resume-dropdown"]')
@@ -788,27 +902,41 @@ class HHPlaywright:
                 pass
             await page.wait_for_timeout(2000)
 
-            items_data = await page.evaluate(
-                """() => {
-                    const sel = document.querySelectorAll('[data-qa="negotiations-item"], .negotiations-list-item');
-                    const out = [];
-                    for (const el of sel) {
-                        const titleEl = el.querySelector('[data-qa="negotiations-item-title"]')
-                            || el.querySelector('a[href*="/vacancy/"]');
-                        const companyEl = el.querySelector('[data-qa="negotiations-item-company"]');
-                        const statusEl = el.querySelector('[data-qa="negotiations-item-status"]');
-                        const unreadEl = el.querySelector('.negotiations-item__unread, [data-qa="negotiations-item-unread"]');
-                        out.push({
-                            title: titleEl ? (titleEl.innerText || '').trim() : '',
-                            href: titleEl ? titleEl.getAttribute('href') || '' : '',
-                            company: companyEl ? (companyEl.innerText || '').trim() : '',
-                            status: statusEl ? (statusEl.innerText || '').trim() : '',
-                            has_unread: !!unreadEl,
-                        });
-                    }
-                    return out;
-                }"""
-            )
+            # Retry evaluate если контекст разрушится из-за фоновой навигации
+            _NEG_JS = """() => {
+                const sel = document.querySelectorAll('[data-qa="negotiations-item"], .negotiations-list-item');
+                const out = [];
+                for (const el of sel) {
+                    const titleEl = el.querySelector('[data-qa="negotiations-item-title"]')
+                        || el.querySelector('a[href*="/vacancy/"]');
+                    const companyEl = el.querySelector('[data-qa="negotiations-item-company"]');
+                    const statusEl = el.querySelector('[data-qa="negotiations-item-status"]');
+                    const unreadEl = el.querySelector('.negotiations-item__unread, [data-qa="negotiations-item-unread"]');
+                    out.push({
+                        title: titleEl ? (titleEl.innerText || '').trim() : '',
+                        href: titleEl ? titleEl.getAttribute('href') || '' : '',
+                        company: companyEl ? (companyEl.innerText || '').trim() : '',
+                        status: statusEl ? (statusEl.innerText || '').trim() : '',
+                        has_unread: !!unreadEl,
+                    });
+                }
+                return out;
+            }"""
+            items_data = []
+            for ev_attempt in (1, 2):
+                try:
+                    items_data = await page.evaluate(_NEG_JS)
+                    break
+                except Exception as ev_e:
+                    if ev_attempt == 1 and "Execution context was destroyed" in str(ev_e):
+                        log.warning("hh_messages_evaluate_retry")
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=8000)
+                        except Exception:
+                            pass
+                        await page.wait_for_timeout(1000)
+                        continue
+                    raise
 
             for d in items_data[:20]:
                 thread_id = ""
@@ -906,38 +1034,50 @@ class HHPlaywright:
                     pass
                 await page.wait_for_timeout(2000)
 
-                # Extract all items via single JS evaluation — avoids stale element handles
-                items_data = await page.evaluate(
-                    """() => {
-                        const sel = document.querySelectorAll('[data-qa="negotiations-item"], .negotiations-list-item');
-                        // If no items found by data-qa, try generic — find any link list inside main
-                        const out = [];
-                        let firstHtml = '';
-                        for (let i = 0; i < sel.length; i++) {
-                            const el = sel[i];
-                            if (i === 0) {
-                                firstHtml = (el.outerHTML || '').substring(0, 1500);
-                            }
-                            const titleEl = el.querySelector('[data-qa="negotiations-item-title"]')
-                                || el.querySelector('a[href*="/vacancy/"]')
-                                || el.querySelector('a');
-                            const companyEl = el.querySelector('[data-qa="negotiations-item-company"]');
-                            const statusEl = el.querySelector('[data-qa="negotiations-item-status"]');
-                            const unreadEl = el.querySelector('.negotiations-item__unread, [data-qa="negotiations-item-unread"]');
-                            // Collect ALL links inside the item — we'll pick the topic one in Python
-                            const allLinks = Array.from(el.querySelectorAll('a')).map(a => a.getAttribute('href') || '').filter(Boolean);
-                            out.push({
-                                title: titleEl ? (titleEl.innerText || '').trim() : '',
-                                href: titleEl ? titleEl.getAttribute('href') || '' : '',
-                                all_links: allLinks,
-                                company: companyEl ? (companyEl.innerText || '').trim() : '',
-                                status: statusEl ? (statusEl.innerText || '').trim() : '',
-                                has_unread: !!unreadEl,
-                            });
+                # Extract all items via single JS evaluation. Retry если контекст
+                # разрушился из-за фоновой навигации страницы.
+                _STATUS_JS = """() => {
+                    const sel = document.querySelectorAll('[data-qa="negotiations-item"], .negotiations-list-item');
+                    const out = [];
+                    let firstHtml = '';
+                    for (let i = 0; i < sel.length; i++) {
+                        const el = sel[i];
+                        if (i === 0) {
+                            firstHtml = (el.outerHTML || '').substring(0, 1500);
                         }
-                        return {items: out, sample_html: firstHtml};
-                    }"""
-                )
+                        const titleEl = el.querySelector('[data-qa="negotiations-item-title"]')
+                            || el.querySelector('a[href*="/vacancy/"]')
+                            || el.querySelector('a');
+                        const companyEl = el.querySelector('[data-qa="negotiations-item-company"]');
+                        const statusEl = el.querySelector('[data-qa="negotiations-item-status"]');
+                        const unreadEl = el.querySelector('.negotiations-item__unread, [data-qa="negotiations-item-unread"]');
+                        const allLinks = Array.from(el.querySelectorAll('a')).map(a => a.getAttribute('href') || '').filter(Boolean);
+                        out.push({
+                            title: titleEl ? (titleEl.innerText || '').trim() : '',
+                            href: titleEl ? titleEl.getAttribute('href') || '' : '',
+                            all_links: allLinks,
+                            company: companyEl ? (companyEl.innerText || '').trim() : '',
+                            status: statusEl ? (statusEl.innerText || '').trim() : '',
+                            has_unread: !!unreadEl,
+                        });
+                    }
+                    return {items: out, sample_html: firstHtml};
+                }"""
+                items_data = {"items": [], "sample_html": ""}
+                for ev_attempt in (1, 2):
+                    try:
+                        items_data = await page.evaluate(_STATUS_JS)
+                        break
+                    except Exception as ev_e:
+                        if ev_attempt == 1 and "Execution context was destroyed" in str(ev_e):
+                            log.warning("hh_status_evaluate_retry", tab=tab_name)
+                            try:
+                                await page.wait_for_load_state("networkidle", timeout=8000)
+                            except Exception:
+                                pass
+                            await page.wait_for_timeout(1000)
+                            continue
+                        raise
                 if isinstance(items_data, dict):
                     if items_data.get("sample_html"):
                         log.info("hh_neg_sample_html", tab=tab_name, html=items_data["sample_html"][:800])

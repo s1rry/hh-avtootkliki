@@ -21,15 +21,38 @@ from app.utils.anti_detect import random_delay
 log = structlog.get_logger()
 
 SEARCH_QUERIES = [
+    # Базовые роли
     "бизнес аналитик",
-    "системный аналитик",
     "бизнес-аналитик",
+    "системный аналитик",
     "системный аналитик middle",
+    "системный аналитик middle+",
+    "ведущий системный аналитик",
     "аналитик",
+    "аналитик IT",
+    "продуктовый аналитик",
     "фулстек аналитик",
+    # Англоязычные варианты (часто публикуют международные команды/IT-холдинги)
+    "business analyst",
+    "system analyst",
+    "systems analyst",
     "product analyst",
+    "IT analyst",
+    # По ключевым технологиям из резюме
     "аналитик REST API",
     "аналитик BPMN",
+    "аналитик UML",
+    "аналитик SQL",
+    "аналитик интеграции",
+    "аналитик микросервисы",
+    # Доменные/прикладные
+    "аналитик CRM",
+    "аналитик ERP",
+    "аналитик 1С",
+    "аналитик банк",
+    "аналитик финтех",
+    "аналитик финансы",
+    "аналитик e-commerce",
 ]
 
 def _build_parsers() -> dict:
@@ -208,8 +231,10 @@ async def run_vacancy_analysis():
                 v.ai_score = analysis.get("score", 0)
                 v.ai_reason = analysis.get("reason", "")
                 v.status = VacancyStatus.ANALYZED
-                if analysis.get("is_relevant") and analysis.get("score", 0) >= 60:
-                    v.status = VacancyStatus.APPROVED
+                # Порог AI убран по запросу пользователя — одобряем ВСЕ
+                # проанализированные вакансии. Бот откликнется на любую, кроме
+                # очевидно сломанных (без url/title).
+                v.status = VacancyStatus.APPROVED
                 await session.commit()
 
             analyzed += 1

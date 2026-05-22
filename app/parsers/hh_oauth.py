@@ -290,6 +290,11 @@ class HHOAuth:
                 return False, {"error": "needs_test", "data": d}
             if "archived" in low or "not_found" in low or "vacancy_not_found" in low or "unavailable" in low or "hidden" in low:
                 return "already", {"error": "unavailable", "data": d}
+            # hh.ru сам запретил отклик ("Can't respond to specified vacancy") —
+            # часто требование к резюме/гео/seniority. Помечаем как "already",
+            # чтобы не накапливать FAILED и не блокировать вакансию в failed_3plus.
+            if "application_denied" in low or "can't respond" in low or "cant respond" in low or "respond to specified" in low:
+                return "already", {"error": "application_denied", "data": d}
             return False, {"error": err_value or "bad_request", "status": r.status_code, "data": d}
         if r.status_code == 401:
             TOKEN_FILE.unlink(missing_ok=True)
