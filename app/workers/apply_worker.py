@@ -134,7 +134,7 @@ async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
         "BPMN / UML, проектирование REST API и интеграций, SQL, постановка "
         "задач разработчикам, приёмка результатов. Готов обсудить детали "
         "и пройти интервью.\n\n"
-        "Контакты: i.egorov8080@gmail.com, tg @egorov_analyst"
+        "Контакты: i.egorov8080@gmail.com, tg https://t.me/egorov_analyst"
     )
 
     # Глобальные ошибки (daily_limit, истёкший токен, нет резюме) одинаково
