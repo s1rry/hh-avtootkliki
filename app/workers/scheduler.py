@@ -25,7 +25,7 @@ class WorkerScheduler:
         state = self._load_state()
         self.is_paused = state.get("is_paused", False)
         self.auto_apply = state.get("auto_apply", False)
-        self.min_ai_score = 40
+        self.min_ai_score = 30
         self.notify = notify_callback  # async fn(text) -> sends to TG
 
         # Время последней отправленной сводки по откликам (для оконного запроса в БД)
