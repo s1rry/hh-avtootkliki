@@ -228,11 +228,12 @@ async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
                 parser = HabrParser()
                 try:
                     await asyncio.wait_for(parser.login(), timeout=30)
-                    # Habr apply: ограничиваем сверху 15с (по запросу пользователя).
-                    # Если за 15с не отозвалось — пропускаем вакансию, идём дальше.
+                    # Habr apply через браузер (загрузка страницы + форма + отправка)
+                    # не успевает за 15с — все новые отклики обрывались по таймауту.
+                    # Подняли до 60с, чтобы отклик успевал завершиться.
                     result = await asyncio.wait_for(
                         parser.apply_to_vacancy(vacancy.url, letter),
-                        timeout=15,
+                        timeout=60,
                     )
                 except asyncio.TimeoutError:
                     log.error("apply_timeout_global", vacancy_id=vacancy.id, url=vacancy.url)
