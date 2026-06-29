@@ -2,7 +2,7 @@ import json
 import functools
 
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
@@ -61,10 +61,25 @@ async def cmd_start(message: Message, **kw):
     await message.answer(
         "👋 <b>Job Hunter Bot</b>\n\n"
         "Автоматический поиск вакансий аналитика\n"
-        "Используй кнопки ниже 👇",
+        "Используй кнопки ниже 👇\n\n"
+        "🌊 А ещё у меня есть <b>Volna</b>, CRM для фрилансеров и самозанятых прямо в Telegram. "
+        "Клиенты, заказы и деньги без таблиц: t.me/volnabbot",
         parse_mode="HTML",
         reply_markup=main_menu(),
     )
+
+
+@router.message(F.text == "🌊 Моя CRM")
+async def btn_my_crm(message: Message, **kw):
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Открыть Volna", url="https://t.me/volnabbot")
+    ]])
+    await message.answer(
+        "🌊 <b>Volna</b> — мой второй продукт.\n\n"
+        "CRM для фрилансеров и самозанятых прямо в Telegram: клиенты, заказы по статусам, "
+        "напоминания о сроках и учёт денег. Без таблиц и сложных программ.\n\n"
+        "Старт бесплатно.",
+        parse_mode="HTML", reply_markup=kb)
 
 
 @router.message(F.text == "📊 Статистика")
