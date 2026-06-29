@@ -38,9 +38,9 @@ async def main(phone: str) -> None:
         return
     _status("code_requested")
 
-    # Ждём код в файле до 5 минут
+    # Ждём код в файле до 15 минут
     code = ""
-    for _ in range(150):
+    for _ in range(450):
         if CODE_FILE.exists():
             code = CODE_FILE.read_text().strip()
             if code:
