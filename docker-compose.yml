@@ -1,6 +1,9 @@
 services:
   app:
-    build: .
+    build:
+      context: .
+      args:
+        INSTALL_PLAYWRIGHT: "true"
     restart: unless-stopped
     env_file: .env
     depends_on:
