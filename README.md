@@ -1,4 +1,8 @@
-# Job Hunter Bot
+# HH Автоотклики — бот авто-откликов на вакансии hh.ru
+
+Автоматические отклики на hh.ru и Хабр Карьере: бот сам ищет вакансии,
+фильтрует и откликается за вас. Авто-отклики hh, автоотклик на вакансии,
+бот для поиска работы аналитиком. (внутреннее имя проекта — `job-hunter`)
 
 📦 **Установка на десктоп (macOS, Windows, Linux) и VPS:** см. [INSTALL.md](INSTALL.md)
 
@@ -135,7 +139,7 @@ app/
 ## Запуск (VPS Ubuntu 22.04)
 
 ```bash
-git clone https://github.com/iegorov8080-sys/job-hunter.git /opt/job-hunter
+git clone https://github.com/egorov8080/hh-avtootkliki.git /opt/job-hunter
 cd /opt/job-hunter
 python3.12 -m venv .venv
 .venv/bin/pip install -e .
