@@ -303,7 +303,78 @@ class HHOAuth:
             return "already", {"error": "not_found"}
         return False, {"status": r.status_code, "body": (r.text or "")[:300]}
 
-    # ── Negotiations (отклики) ─────────────────────────────────────────
+    async def negotiations_status(self, max_pages: int = 60) -> list[dict]:
+        """Все отклики через API hh.ru с точными статусами.
+
+        Возвращает список {tab, title, company, status}, где tab —
+        invitations | discard | pending. Постранично (per_page=100),
+        в отличие от старого скрапинга (он брал только 20 первых).
+        """
+        token = await self.get_token()
+        if not token:
+            return []
+        # ВАЖНО: без андроид-UA (ru.hh.android) — с ним HH отдаёт приглашения
+        # как state=response. С обычным UA статусы приходят корректно.
+        headers = {"Authorization": f"Bearer {token}"}
+
+        def _classify(item: dict) -> dict:
+            sid = ((item.get("state") or {}).get("id") or "").lower()
+            vac = item.get("vacancy") or {}
+            emp = vac.get("employer") or {}
+            if sid == "invitation":
+                tab = "invitations"
+            elif sid == "discard":
+                tab = "discard"
+            else:
+                tab = "pending"  # response / consider / прочее = без ответа
+            return {
+                "tab": tab,
+                "title": vac.get("name") or "",
+                "company": emp.get("name") or "",
+                "status": (item.get("state") or {}).get("name") or "",
+            }
+
+        # order_by=created_at — стабильный порядок (created_at не меняется, в
+        # отличие от updated_at), новые отклики добавляются в конец и не сдвигают
+        # уже прочитанные страницы. Плюс дедуп по id — на случай дрейфа.
+        base_params = {"per_page": 100, "order_by": "created_at"}
+        out: list[dict] = []
+        seen: set = set()
+        async with httpx.AsyncClient(timeout=20, verify=False) as c:
+            try:
+                r = await c.get(
+                    "https://api.hh.ru/negotiations",
+                    headers=headers, params={**base_params, "page": 0},
+                )
+                data = r.json()
+            except Exception as e:
+                log.warning("negotiations_status_error", error=str(e))
+                return []
+            pages = min(int(data.get("pages", 1) or 1), max_pages)
+            for it in data.get("items", []):
+                if it.get("id") in seen:
+                    continue
+                seen.add(it.get("id"))
+                out.append(_classify(it))
+            for p in range(1, pages):
+                try:
+                    rp = await c.get(
+                        "https://api.hh.ru/negotiations",
+                        headers=headers, params={**base_params, "page": p},
+                    )
+                    for it in rp.json().get("items", []):
+                        if it.get("id") in seen:
+                            continue
+                        seen.add(it.get("id"))
+                        out.append(_classify(it))
+                except Exception:
+                    break
+        from collections import Counter as _C
+        _tabs = _C(s["tab"] for s in out)
+        log.info("negotiations_status_done", total=len(out), tabs=dict(_tabs))
+        return out
+
+    # ── Очистка откликов ───────────────────────────────────────────────
     # GET  /negotiations?status=active&page=&per_page=100  — список откликов
     # DELETE /negotiations/active/{id}                     — отозвать/скрыть
     # state.id == "discard" → отказ работодателя.
@@ -403,7 +474,6 @@ class HHOAuth:
                     names.append(vac_name)
                 continue
 
-            # Для активного отклика (не отказ) нужно передать decline-сообщение.
             ok = await self._delete_negotiation(
                 str(neg.get("id")), with_decline_message=not is_discard
             )
@@ -413,6 +483,51 @@ class HHOAuth:
                     names.append(vac_name)
 
         return {"scanned": len(items), "deleted": deleted, "names": names}
+
+    # ── Поднятие резюме ────────────────────────────────────────────────
+    # GET  /resumes/mine                  — список своих резюме
+    # POST /resumes/{id}/publish          — поднять (если can_publish_or_update)
+    # Работает по OAuth-токену, без браузера. У hh обычно можно поднимать
+    # раз в 4 часа — тогда can_publish_or_update=false и мы это покажем.
+
+    async def bump_resumes(self) -> dict:
+        """Поднять все резюме через официальный API.
+
+        Возвращает {"bumped", "titles": [...], "blocked", "error"?}.
+        blocked — сколько резюме пока нельзя поднять (рано, ждать ~4 часа).
+        """
+        token = await self.get_token()
+        if not token:
+            return {"bumped": 0, "titles": [], "blocked": 0, "error": "no_oauth_token"}
+        headers = {"User-Agent": UA, "Authorization": f"Bearer {token}"}
+        bumped = 0
+        blocked = 0
+        titles: list[str] = []
+        try:
+            async with httpx.AsyncClient(timeout=20, verify=False) as c:
+                r = await c.get("https://api.hh.ru/resumes/mine", headers=headers)
+                if r.status_code != 200:
+                    log.warning("resumes_list_failed", status=r.status_code, body=r.text[:150])
+                    return {"bumped": 0, "titles": [], "blocked": 0, "error": f"list_{r.status_code}"}
+                items = r.json().get("items", [])
+                for res in items:
+                    rid = res.get("id")
+                    title = res.get("title") or "резюме"
+                    if not res.get("can_publish_or_update"):
+                        blocked += 1
+                        continue
+                    pr = await c.post(
+                        f"https://api.hh.ru/resumes/{rid}/publish", headers=headers
+                    )
+                    if pr.status_code in (200, 204):
+                        bumped += 1
+                        if len(titles) < 10:
+                            titles.append(title)
+                    else:
+                        log.warning("resume_publish_failed", rid=rid, status=pr.status_code, body=pr.text[:150])
+        except Exception as e:
+            return {"bumped": bumped, "titles": titles, "blocked": blocked, "error": str(e)}
+        return {"bumped": bumped, "titles": titles, "blocked": blocked}
 
 
 hh_oauth = HHOAuth()
