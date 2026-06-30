@@ -10,9 +10,8 @@ def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🔍 Вакансии"), KeyboardButton(text="📊 Статистика")],
-            [KeyboardButton(text="⭐ Топ вакансии"), KeyboardButton(text="📩 Сообщения")],
-            [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="📋 Логи")],
-            [KeyboardButton(text="🌊 Моя CRM")],
+            [KeyboardButton(text="📩 Сообщения"), KeyboardButton(text="⚙️ Настройки")],
+            [KeyboardButton(text="📋 Логи"), KeyboardButton(text="🌊 Моя CRM")],
         ],
         resize_keyboard=True,
     )
@@ -98,6 +97,7 @@ def settings_keyboard(is_paused: bool = False, auto_apply: bool = False) -> Inli
 
 _FLAG_LABELS = {
     "auto_apply": "Авто-отклики",
+    "ai_letters": "Уникальные письма (AI)",
     "pass_tests": "Проходить тесты вакансий",
     "notify_messages": "Сообщать о рекрутёрах",
     "thank_rejections": "Благодарить за отказ",

@@ -30,6 +30,7 @@ class WorkerScheduler:
         self.notify_messages = state.get("notify_messages", True)
         self.thank_rejections = state.get("thank_rejections", True)
         self.bump_resume = state.get("bump_resume", True)
+        self.ai_letters = state.get("ai_letters", True)
         self.min_ai_score = 30
         self.notify = notify_callback  # async fn(text) -> sends to TG
 
@@ -70,6 +71,7 @@ class WorkerScheduler:
             state["notify_messages"] = self.notify_messages
             state["thank_rejections"] = self.thank_rejections
             state["bump_resume"] = self.bump_resume
+            state["ai_letters"] = self.ai_letters
             state["paused_platforms"] = sorted(self.paused_platforms)
             state["manual_paused_platforms"] = sorted(self.manual_paused_platforms)
             state["last_login_alert"] = self._last_login_alert
@@ -656,7 +658,7 @@ class WorkerScheduler:
         log.info("auto_apply_set", enabled=enabled)
 
     # Флаги «что делает бот» для меню с галочками
-    FLAG_NAMES = ("auto_apply", "pass_tests", "notify_messages", "thank_rejections", "bump_resume")
+    FLAG_NAMES = ("auto_apply", "ai_letters", "pass_tests", "notify_messages", "thank_rejections", "bump_resume")
 
     def get_flags(self) -> dict:
         return {n: bool(getattr(self, n, True)) for n in self.FLAG_NAMES}

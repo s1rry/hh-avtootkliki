@@ -208,7 +208,8 @@ async def btn_top(message: Message, **kw):
 @router.message(Command("messages"))
 @admin_only
 async def btn_messages(message: Message, **kw):
-    await message.answer("🔄 Проверяю статусы откликов на hh.ru...")
+    import html as _html
+    await message.answer("🔄 Проверяю приглашения на hh.ru...")
     from app.parsers.hh_oauth import hh_oauth
     statuses = await hh_oauth.negotiations_status()
 
@@ -220,13 +221,29 @@ async def btn_messages(message: Message, **kw):
     discards = [s for s in statuses if s.get("tab") == "discard"]
     pending = [s for s in statuses if s.get("tab") == "pending"]
 
-    parts = ["📩 <b>Сообщения и отклики hh.ru</b>"]
-    parts.append(f"\n🎉 Приглашения и собеседования: <b>{len(invites)}</b>")
-    parts.append(f"❌ Отказы: <b>{len(discards)}</b>")
-    parts.append(f"⏳ Без ответа: <b>{len(pending)}</b>")
+    header = (
+        "📩 <b>Приглашения от работодателей</b>\n"
+        f"🎉 Приглашений: <b>{len(invites)}</b>  •  ❌ Отказы: {len(discards)}  •  "
+        f"⏳ Без ответа: {len(pending)}"
+    )
 
-    text = "\n".join(parts)
-    # Telegram limit ~4096 chars
+    if not invites:
+        await message.answer(
+            header + "\n\nПока никто не позвал. Как появится приглашение — покажу здесь.",
+            parse_mode="HTML",
+        )
+        return
+
+    # Показываем сами приглашения (компания + вакансия), новые сверху.
+    lines = [header, "\n<b>Кто позвал:</b>"]
+    for s in invites[-25:][::-1]:
+        company = _html.escape((s.get("company") or "").strip() or "—")
+        title = _html.escape((s.get("title") or "").strip() or "вакансия")
+        lines.append(f"• <b>{company}</b> — {title}")
+    if len(invites) > 25:
+        lines.append(f"…и ещё {len(invites) - 25}. Полная переписка — в чатах на hh.ru.")
+
+    text = "\n".join(lines)
     if len(text) > 3900:
         text = text[:3900] + "\n…"
     await message.answer(text, parse_mode="HTML")

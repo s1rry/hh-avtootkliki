@@ -51,6 +51,7 @@ async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
     # выборку. Объединяем auto-pause (login_health) и manual-pause (юзер).
     paused_platforms: set[str] = set()
     pass_tests = True  # флаг «проходить тесты вакансий» (галочка в боте)
+    ai_letters = True  # флаг «уникальные письма (AI)» (галочка в боте)
     try:
         import json as _json
         from pathlib import Path as _Path
@@ -60,6 +61,7 @@ async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
             paused_platforms = set(_st.get("paused_platforms", []))
             paused_platforms |= set(_st.get("manual_paused_platforms", []))
             pass_tests = _st.get("pass_tests", True)
+            ai_letters = _st.get("ai_letters", True)
     except Exception as e:
         log.warning("read_paused_platforms_error", error=str(e))
 
@@ -166,6 +168,18 @@ async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
             continue
         try:
             letter = render_letter(vacancy.title)
+            # Уникальное письмо под вакансию через AI (Haiku, дёшево). При сбое/выкл
+            # остаётся шаблон render_letter. Так письма перестают быть одинаковыми.
+            if ai_letters:
+                try:
+                    ai_l, _it, _ot = await asyncio.wait_for(
+                        claude_ai.generate_cover_letter(vacancy.title, vacancy.description or ""),
+                        timeout=25,
+                    )
+                    if ai_l and len(ai_l.strip()) > 40:
+                        letter = ai_l.strip()
+                except Exception as e:
+                    log.warning("ai_letter_fallback", vacancy_id=vacancy.id, error=str(e))
 
             # HH через OAuth API (быстро, обходит DDoS Guard)
             result = False
