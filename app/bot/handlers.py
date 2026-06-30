@@ -843,6 +843,31 @@ async def cb_bflag(callback: CallbackQuery, **kw):
         pass
 
 
+_SUPPORT_TON = "UQDCmkc57YsmcAY0b10os1Ho-9K_TO7ub3RNldzxTlr1auNv"
+_SUPPORT_TRC20 = "TMSGFkrPx65W4Z5ckebeuH8kBQDR1rtfBb"
+
+
+@router.callback_query(F.data == "support")
+@admin_only
+async def cb_support(callback: CallbackQuery, **kw):
+    await callback.answer()
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="💎 Открыть кошелёк (TON)",
+                             url=f"https://app.tonkeeper.com/transfer/{_SUPPORT_TON}")
+    ]])
+    await callback.message.answer(
+        "💎 <b>Поддержать автора</b>\n\n"
+        "Спасибо! Любая поддержка помогает развивать бота.\n\n"
+        "<b>TON / USDT (сеть TON):</b>\n"
+        f"<code>{_SUPPORT_TON}</code>\n\n"
+        "<b>USDT (сеть TRON, TRC20):</b>\n"
+        f"<code>{_SUPPORT_TRC20}</code>\n\n"
+        "Нажми на адрес — он скопируется. Или жми кнопку ниже, чтобы перевести TON.",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+
+
 @router.callback_query(F.data == "clear_neg")
 @admin_only
 async def cb_clear_neg_menu(callback: CallbackQuery, **kw):

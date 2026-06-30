@@ -90,6 +90,9 @@ def settings_keyboard(is_paused: bool = False, auto_apply: bool = False) -> Inli
         [
             InlineKeyboardButton(text="🎛 Что делает бот", callback_data="behavior_menu"),
         ],
+        [
+            InlineKeyboardButton(text="💎 Поддержать автора", callback_data="support"),
+        ],
     ])
 
 
