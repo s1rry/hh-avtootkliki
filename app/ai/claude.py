@@ -15,6 +15,8 @@ from app.ai.prompts import (
 log = structlog.get_logger()
 
 MODEL = "claude-sonnet-4-6"
+# Модель для прохождения тестов вакансий (ответы на вопросы/тесты работодателя)
+TEST_MODEL = "claude-haiku-4-5"
 AI_STATE_FILE = Path("data/ai_state.json")
 
 
@@ -71,7 +73,7 @@ class ClaudeAI:
                 return text
         return ""
 
-    async def _call(self, system: str, user_message: str, max_tokens: int = 1024) -> tuple[str, int, int]:
+    async def _call(self, system: str, user_message: str, max_tokens: int = 1024, model: str | None = None) -> tuple[str, int, int]:
         # Minimum sane budget — small max_tokens makes models return empty content
         if max_tokens < 800:
             max_tokens = 800
@@ -79,7 +81,7 @@ class ClaudeAI:
         # Permanent fallback: if primary was exhausted before, go straight to fallback.
         if self.use_fallback and self.fallback:
             response = await self.fallback.messages.create(
-                model=MODEL, max_tokens=max_tokens, system=system,
+                model=model or MODEL, max_tokens=max_tokens, system=system,
                 messages=[{"role": "user", "content": user_message}],
             )
             text = self._extract_text(response)
@@ -87,7 +89,7 @@ class ClaudeAI:
 
         try:
             response = await self.primary.messages.create(
-                model=MODEL, max_tokens=max_tokens, system=system,
+                model=model or MODEL, max_tokens=max_tokens, system=system,
                 messages=[{"role": "user", "content": user_message}],
             )
             text = self._extract_text(response)
@@ -100,7 +102,7 @@ class ClaudeAI:
                 self.use_fallback = True
                 self._save_use_fallback()
                 response = await self.fallback.messages.create(
-                    model=MODEL, max_tokens=max_tokens, system=system,
+                    model=model or MODEL, max_tokens=max_tokens, system=system,
                     messages=[{"role": "user", "content": user_message}],
                 )
                 text = self._extract_text(response)

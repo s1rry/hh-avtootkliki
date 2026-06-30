@@ -483,7 +483,7 @@ class HHPlaywright:
 
     async def _fill_response_form(self, page: Page, cover_letter: str, vacancy_url: str):
         """Fill cover letter, employer questions (test task), and resume picker."""
-        from app.ai.claude import claude_ai
+        from app.ai.claude import claude_ai, TEST_MODEL
         from app.config import settings as cfg
 
         # 1. Find ALL textareas that look like employer-question answer fields.
@@ -603,7 +603,7 @@ class HHPlaywright:
                             f"Резюме:\n{cfg.resume_text[:1500]}"
                         )
                         try:
-                            ai_resp, _, _ = await _ai._call(ai_system, ai_user, max_tokens=20)
+                            ai_resp, _, _ = await _ai._call(ai_system, ai_user, max_tokens=20, model=TEST_MODEL)
                             m = re.search(r"\d+", ai_resp)
                             if m:
                                 idx = int(m.group(0)) - 1
@@ -705,7 +705,7 @@ class HHPlaywright:
                 f"Профиль кандидата:\n{cfg.resume_text}"
             )
             try:
-                ai_resp, _, _ = await claude_ai._call(system, user_msg, max_tokens=2000)
+                ai_resp, _, _ = await claude_ai._call(system, user_msg, max_tokens=2000, model=TEST_MODEL)
                 ai_resp = ai_resp.strip()
                 # Strip markdown if present
                 if ai_resp.startswith("```"):
