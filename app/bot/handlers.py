@@ -24,6 +24,7 @@ from app.bot.keyboards import (
     confirm_apply_keyboard,
     settings_keyboard,
     clear_neg_keyboard,
+    behavior_keyboard,
 )
 
 router = Router()
@@ -800,6 +801,46 @@ async def cb_bump_resume(callback: CallbackQuery, **kw):
         )
     else:
         await callback.message.answer("ℹ️ Резюме не найдены в аккаунте hh.")
+
+
+_BEHAVIOR_DEFAULTS = {
+    "auto_apply": False, "pass_tests": True, "notify_messages": True,
+    "thank_rejections": True, "bump_resume": True,
+}
+
+
+@router.callback_query(F.data == "behavior_menu")
+@admin_only
+async def cb_behavior_menu(callback: CallbackQuery, **kw):
+    await callback.answer()
+    flags = _scheduler.get_flags() if _scheduler else dict(_BEHAVIOR_DEFAULTS)
+    await callback.message.answer(
+        "🎛 <b>Что делает бот</b>\n\n"
+        "Нажми на пункт, чтобы включить (✅) или выключить (⬜️):\n"
+        "• <b>Авто-отклики</b> — сам откликается на вакансии\n"
+        "• <b>Проходить тесты</b> — AI отвечает на вопросы/тесты работодателя\n"
+        "• <b>Сообщать о рекрутёрах</b> — уведомления о реальных ответах (приглашения, интервью)\n"
+        "• <b>Благодарить за отказ</b> — авто-сообщение спасибо при отказе\n"
+        "• <b>Поднимать резюме</b> — авто-поднятие резюме каждые 4 часа",
+        parse_mode="HTML",
+        reply_markup=behavior_keyboard(flags),
+    )
+
+
+@router.callback_query(F.data.startswith("bflag:"))
+@admin_only
+async def cb_bflag(callback: CallbackQuery, **kw):
+    name = callback.data.split(":", 1)[1]
+    if not _scheduler:
+        await callback.answer("Планировщик ещё не готов", show_alert=True)
+        return
+    cur = bool(getattr(_scheduler, name, True))
+    _scheduler.set_flag(name, not cur)
+    await callback.answer("Включено" if not cur else "Выключено")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=behavior_keyboard(_scheduler.get_flags()))
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data == "clear_neg")

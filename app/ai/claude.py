@@ -14,7 +14,7 @@ from app.ai.prompts import (
 
 log = structlog.get_logger()
 
-MODEL = "claude-sonnet-4-6"
+MODEL = "claude-haiku-4-5"
 # Модель для прохождения тестов вакансий (ответы на вопросы/тесты работодателя)
 TEST_MODEL = "claude-haiku-4-5"
 AI_STATE_FILE = Path("data/ai_state.json")

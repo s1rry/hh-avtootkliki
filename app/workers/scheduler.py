@@ -25,6 +25,11 @@ class WorkerScheduler:
         state = self._load_state()
         self.is_paused = state.get("is_paused", False)
         self.auto_apply = state.get("auto_apply", False)
+        # Флаги «что делает бот» (галочки в боте). По умолчанию включены.
+        self.pass_tests = state.get("pass_tests", True)
+        self.notify_messages = state.get("notify_messages", True)
+        self.thank_rejections = state.get("thank_rejections", True)
+        self.bump_resume = state.get("bump_resume", True)
         self.min_ai_score = 30
         self.notify = notify_callback  # async fn(text) -> sends to TG
 
@@ -61,6 +66,10 @@ class WorkerScheduler:
             state = self._load_state()  # сохраняем прочие ключи
             state["is_paused"] = self.is_paused
             state["auto_apply"] = self.auto_apply
+            state["pass_tests"] = self.pass_tests
+            state["notify_messages"] = self.notify_messages
+            state["thank_rejections"] = self.thank_rejections
+            state["bump_resume"] = self.bump_resume
             state["paused_platforms"] = sorted(self.paused_platforms)
             state["manual_paused_platforms"] = sorted(self.manual_paused_platforms)
             state["last_login_alert"] = self._last_login_alert
@@ -183,7 +192,7 @@ class WorkerScheduler:
             log.error("job_analyze_error", error=str(e))
 
     async def _job_messages(self):
-        if self.is_paused:
+        if self.is_paused or not self.notify_messages:
             return
         try:
             new_msgs = await check_all_messages()
@@ -312,7 +321,7 @@ class WorkerScheduler:
             log.error("job_apply_error", error=str(e))
 
     async def _job_bump_resume(self):
-        if self.is_paused:
+        if self.is_paused or not self.bump_resume:
             return
         try:
             from app.parsers.hh_playwright import hh_playwright
@@ -618,7 +627,7 @@ class WorkerScheduler:
     async def _job_thank_rejections(self):
         """Send thanks message to recent rejected negotiations.
         Limited rate to avoid hh.ru ban: max 3 per run, with delays."""
-        if self.is_paused:
+        if self.is_paused or not self.thank_rejections:
             return
         try:
             from app.parsers.hh_playwright import hh_playwright
@@ -645,6 +654,18 @@ class WorkerScheduler:
         self.auto_apply = enabled
         self._save_state()
         log.info("auto_apply_set", enabled=enabled)
+
+    # Флаги «что делает бот» для меню с галочками
+    FLAG_NAMES = ("auto_apply", "pass_tests", "notify_messages", "thank_rejections", "bump_resume")
+
+    def get_flags(self) -> dict:
+        return {n: bool(getattr(self, n, True)) for n in self.FLAG_NAMES}
+
+    def set_flag(self, name: str, value: bool):
+        if name in self.FLAG_NAMES:
+            setattr(self, name, value)
+            self._save_state()
+            log.info("bot_flag_set", flag=name, value=value)
 
     def stop(self):
         self.scheduler.shutdown()

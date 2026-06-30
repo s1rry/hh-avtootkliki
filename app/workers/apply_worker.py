@@ -50,6 +50,7 @@ async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
     # Платформы на паузе (из scheduler_state.json) — для них пропускаем
     # выборку. Объединяем auto-pause (login_health) и manual-pause (юзер).
     paused_platforms: set[str] = set()
+    pass_tests = True  # флаг «проходить тесты вакансий» (галочка в боте)
     try:
         import json as _json
         from pathlib import Path as _Path
@@ -58,6 +59,7 @@ async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
             _st = _json.loads(_sf.read_text())
             paused_platforms = set(_st.get("paused_platforms", []))
             paused_platforms |= set(_st.get("manual_paused_platforms", []))
+            pass_tests = _st.get("pass_tests", True)
     except Exception as e:
         log.warning("read_paused_platforms_error", error=str(e))
 
@@ -191,7 +193,11 @@ async def run_auto_apply(auto_mode: bool = False, min_score: float = 70):
                         else:
                             log.warning("hh_oauth_failed", vacancy_id=vacancy.id, info=info)
                         # Fallback to Playwright only on quota / needs_test
-                        if err == "needs_test":
+                        if err == "needs_test" and not pass_tests:
+                            # Галочка «проходить тесты» выключена — пропускаем тест-вакансию
+                            log.info("hh_skip_test_disabled", vacancy_id=vacancy.id)
+                            skip_record = True
+                        elif err == "needs_test":
                             log.info("hh_fallback_playwright_for_test", vacancy_id=vacancy.id)
                             # Vacancy has questionnaire — generate AI letter (it's worth tokens here)
                             try:

@@ -87,7 +87,28 @@ def settings_keyboard(is_paused: bool = False, auto_apply: bool = False) -> Inli
         [
             InlineKeyboardButton(text="🧹 Очистить отклики", callback_data="clear_neg"),
         ],
+        [
+            InlineKeyboardButton(text="🎛 Что делает бот", callback_data="behavior_menu"),
+        ],
     ])
+
+
+_FLAG_LABELS = {
+    "auto_apply": "Авто-отклики",
+    "pass_tests": "Проходить тесты вакансий",
+    "notify_messages": "Сообщать о рекрутёрах",
+    "thank_rejections": "Благодарить за отказ",
+    "bump_resume": "Поднимать резюме",
+}
+
+
+def behavior_keyboard(flags: dict) -> InlineKeyboardMarkup:
+    """Меню с галочками: что бот делает. Нажатие переключает флаг."""
+    rows = []
+    for name, label in _FLAG_LABELS.items():
+        mark = "✅" if flags.get(name, True) else "⬜️"
+        rows.append([InlineKeyboardButton(text=f"{mark} {label}", callback_data=f"bflag:{name}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def clear_neg_keyboard() -> InlineKeyboardMarkup:
