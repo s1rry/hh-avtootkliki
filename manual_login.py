@@ -10,6 +10,7 @@ import asyncio
 import json
 import subprocess
 import os
+import secrets
 import time
 from pathlib import Path
 
@@ -20,11 +21,13 @@ async def main():
     xvfb = subprocess.Popen(["Xvfb", ":99", "-screen", "0", "1280x720x24"])
     time.sleep(1)
 
-    # Start x11vnc with password
+    # Start x11vnc with a random per-run password, bound to localhost only.
+    # Never expose VNC to the internet — connect through an SSH tunnel.
+    vnc_pass = secrets.token_urlsafe(9)
     vnc = subprocess.Popen(
         [
-            "x11vnc", "-display", ":99", "-forever",
-            "-passwd", "hh2026", "-rfbport", "5900",
+            "x11vnc", "-display", ":99", "-forever", "-localhost",
+            "-passwd", vnc_pass, "-rfbport", "5900",
             "-noxdamage",
         ],
         stdout=subprocess.DEVNULL,
@@ -33,9 +36,10 @@ async def main():
     time.sleep(1)
 
     print("=" * 50)
-    print("VNC ready! Connect:")
-    print("  Address: 138.16.160.99:5900")
-    print("  Password: hh2026")
+    print("VNC ready (localhost only). Connect via SSH tunnel:")
+    print("  1) on your machine: ssh -L 5900:localhost:5900 root@<server-ip>")
+    print("  2) VNC client to: localhost:5900")
+    print(f"  Password (random, one-time): {vnc_pass}")
     print("=" * 50)
 
     from playwright.async_api import async_playwright

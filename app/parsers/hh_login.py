@@ -158,7 +158,7 @@ class OTPLoginSession:
 
     async def _exchange(self, code: str) -> dict | None:
         try:
-            async with httpx.AsyncClient(timeout=15, verify=False) as c:
+            async with httpx.AsyncClient(timeout=15) as c:
                 r = await c.post(
                     "https://hh.ru/oauth/token",
                     data={

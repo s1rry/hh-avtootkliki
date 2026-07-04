@@ -7,12 +7,14 @@ import asyncio
 import json
 import subprocess
 import os
+import secrets
 import time
 from pathlib import Path
 
 
 async def main():
     os.environ["DISPLAY"] = ":99"
+    vnc_pass = secrets.token_urlsafe(9)
     # Start Xvfb + x11vnc (if not already running)
     try:
         subprocess.run(["pgrep", "-x", "Xvfb"], check=True, capture_output=True)
@@ -24,13 +26,17 @@ async def main():
         subprocess.run(["pgrep", "-x", "x11vnc"], check=True, capture_output=True)
     except subprocess.CalledProcessError:
         subprocess.Popen([
-            "x11vnc", "-display", ":99", "-forever",
-            "-passwd", "hh2026", "-rfbport", "5900", "-noxdamage",
+            "x11vnc", "-display", ":99", "-forever", "-localhost",
+            "-passwd", vnc_pass, "-rfbport", "5900", "-noxdamage",
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(2)
 
     print("=" * 50)
-    print("VNC: 138.16.160.99:5900  pass: hh2026")
+    print("VNC ready (localhost only). Connect via SSH tunnel:")
+    print("  1) on your machine: ssh -L 5900:localhost:5900 root@<server-ip>")
+    print("  2) VNC client to: localhost:5900")
+    print(f"  Password (random, one-time): {vnc_pass}")
+    print("  (если VNC уже был запущен другим скриптом — пароль от него)")
     print("Залогинься на Habr Career вручную, скрипт сам сохранит куки")
     print("=" * 50)
 

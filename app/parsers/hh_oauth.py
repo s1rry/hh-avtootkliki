@@ -69,7 +69,7 @@ class HHOAuth:
 
     async def _refresh(self, refresh_token: str) -> dict | None:
         try:
-            async with httpx.AsyncClient(timeout=15, verify=False) as c:
+            async with httpx.AsyncClient(timeout=15) as c:
                 r = await c.post(
                     "https://hh.ru/oauth/token",
                     data={
@@ -169,7 +169,7 @@ class HHOAuth:
         if not code:
             return None
         try:
-            async with httpx.AsyncClient(timeout=15, verify=False) as c:
+            async with httpx.AsyncClient(timeout=15) as c:
                 r3 = await c.post(
                     "https://hh.ru/oauth/token",
                     data={
@@ -225,7 +225,7 @@ class HHOAuth:
             data["message"] = message
 
         async def _post(token: str):
-            async with httpx.AsyncClient(timeout=15, verify=False) as c:
+            async with httpx.AsyncClient(timeout=15) as c:
                 return await c.post(
                     "https://api.hh.ru/negotiations",
                     headers={
@@ -340,7 +340,7 @@ class HHOAuth:
         base_params = {"per_page": 100, "order_by": "created_at"}
         out: list[dict] = []
         seen: set = set()
-        async with httpx.AsyncClient(timeout=20, verify=False) as c:
+        async with httpx.AsyncClient(timeout=20) as c:
             try:
                 r = await c.get(
                     "https://api.hh.ru/negotiations",
@@ -387,7 +387,7 @@ class HHOAuth:
         out: list[dict] = []
         headers = {"User-Agent": UA, "Authorization": f"Bearer {token}"}
         try:
-            async with httpx.AsyncClient(timeout=20, verify=False) as c:
+            async with httpx.AsyncClient(timeout=20) as c:
                 page = 0
                 while True:
                     r = await c.get(
@@ -415,7 +415,7 @@ class HHOAuth:
         if not token:
             return False
         try:
-            async with httpx.AsyncClient(timeout=15, verify=False) as c:
+            async with httpx.AsyncClient(timeout=15) as c:
                 r = await c.delete(
                     f"https://api.hh.ru/negotiations/active/{nid}",
                     headers={"User-Agent": UA, "Authorization": f"Bearer {token}"},
@@ -504,7 +504,7 @@ class HHOAuth:
         blocked = 0
         titles: list[str] = []
         try:
-            async with httpx.AsyncClient(timeout=20, verify=False) as c:
+            async with httpx.AsyncClient(timeout=20) as c:
                 r = await c.get("https://api.hh.ru/resumes/mine", headers=headers)
                 if r.status_code != 200:
                     log.warning("resumes_list_failed", status=r.status_code, body=r.text[:150])
