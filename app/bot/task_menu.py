@@ -20,6 +20,7 @@ from sqlalchemy import select, func
 
 from app.config import settings
 from app.database import async_session
+from app.bot.media import send_photo_or_text
 from app.models.application import Application, ApplicationStatus
 from app.models.user_settings import UserSettings
 from app.services.user_service import get_or_create_user
@@ -132,22 +133,20 @@ async def cmd_start(message: Message, state: FSMContext, **kw):
         connected = user.hh_connected
         s, active = user.get_settings(), user.is_active
     if not connected:
-        await message.answer(
-            "🔥 <b>Работай эффективнее 99% кандидатов и находи работу в разы быстрее!</b>\n\n"
-            "🤖 Это твой персональный AI-ассистент по поиску работы на hh.ru. "
-            "Он работает 24/7, чтобы ты не упустил ни одной подходящей вакансии.\n\n"
-            "⏳ Берёт на себя рутину откликов и экономит твоё время.\n\n"
+        await send_photo_or_text(
+            message, "welcome",
+            "🔥 <b>Работай эффективнее 99% кандидатов и находи работу быстрее!</b>\n\n"
+            "🤖 Персональный AI-ассистент по поиску работы на hh.ru. Работает 24/7, "
+            "чтобы ты не упустил ни одной подходящей вакансии.\n\n"
             "<b>Что умеет:</b>\n"
             "⚡️ Авто-отклики на hh.ru по твоим фильтрам\n"
             "✉️ Персональные сопроводительные письма (ИИ)\n"
             "📈 Авто-поднятие резюме\n"
             "📊 Статистику откликов\n\n"
-            "Сейчас бета-тест — полностью бесплатно ❤️\n\n"
+            "Сейчас бета-тест — бесплатно ❤️\n\n"
             "<b>Как начать:</b>\n"
             "1️⃣ Подключи hh.ru — /connect\n"
-            "2️⃣ Настрой задачу — кнопка 📋 Задача внизу\n\n"
-            "Пароль вводить не нужно, только код от hh.",
-            parse_mode="HTML",
+            "2️⃣ Настрой задачу — кнопка 📋 Задача внизу",
             reply_markup=main_reply_kb(),
         )
     else:
@@ -218,9 +217,9 @@ async def cb_acc_add(cb: CallbackQuery, **kw):
 
 @router.message(F.text == BTN_SUPPORT)
 async def btn_support(message: Message, **kw):
-    await message.answer(
+    await send_photo_or_text(
+        message, "support",
         f"🆘 <b>Поддержка</b>\n\nПо любым вопросам пиши: {settings.support_contact}",
-        parse_mode="HTML",
     )
 
 

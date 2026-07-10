@@ -131,9 +131,11 @@ async def connect_code(message: Message, state: FSMContext, **kw):
         await session.commit()
 
     if resume_id:
-        await message.answer(
-            "✅ hh.ru подключён, резюме загружено.\n"
-            "Теперь настрой задачу автоотклика: /task"
+        from app.bot.media import send_photo_or_text
+        await send_photo_or_text(
+            message, "apply",
+            "✅ <b>hh.ru подключён, резюме загружено.</b>\n\n"
+            "Теперь настрой задачу автоотклика — кнопка 📋 Задача (или /task).",
         )
     else:
         await message.answer(
