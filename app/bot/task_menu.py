@@ -12,9 +12,15 @@ from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
+    ReplyKeyboardMarkup, KeyboardButton,
+)
+from sqlalchemy import select, func
 
+from app.config import settings
 from app.database import async_session
+from app.models.application import Application, ApplicationStatus
 from app.models.user_settings import UserSettings
 from app.services.user_service import get_or_create_user
 
@@ -40,6 +46,21 @@ FREE_DAILY_LIMIT = 50
 PAID_DAILY_LIMIT = 200
 
 LETTER_MODES = {"always": "всегда", "required": "только где требуется", "off": "без писем"}
+
+BTN_TASK = "📋 Задача"
+BTN_STATS = "📊 Статистика"
+BTN_SUPPORT = "🆘 Поддержка"
+BTN_PROJECTS = "🚀 Другие проекты"
+
+
+def main_reply_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_TASK), KeyboardButton(text=BTN_STATS)],
+            [KeyboardButton(text=BTN_SUPPORT), KeyboardButton(text=BTN_PROJECTS)],
+        ],
+        resize_keyboard=True,
+    )
 
 
 class TaskInput(StatesGroup):
@@ -115,9 +136,57 @@ async def cmd_start(message: Message, state: FSMContext, **kw):
             "Шаг 2 — настрой задачу: /task\n\n"
             "Пароль вводить не нужно, только код от hh.",
             parse_mode="HTML",
+            reply_markup=main_reply_kb(),
         )
     else:
+        await message.answer("Меню внизу 👇", reply_markup=main_reply_kb())
         await _show_main(message, s, active)
+
+
+# ── Нижние кнопки ──
+@router.message(F.text == BTN_TASK)
+async def btn_task(message: Message, state: FSMContext, **kw):
+    await cmd_task(message, state)
+
+
+@router.message(F.text == BTN_STATS)
+async def btn_stats(message: Message, **kw):
+    async with async_session() as session:
+        user = await _load(session, message)
+        total = (await session.execute(
+            select(func.count(Application.id)).where(
+                Application.user_id == user.id, Application.status == ApplicationStatus.SENT)
+        )).scalar() or 0
+        today = (await session.execute(
+            select(func.count(Application.id)).where(
+                Application.user_id == user.id, Application.status == ApplicationStatus.SENT,
+                func.date(Application.created_at) == func.current_date())
+        )).scalar() or 0
+        active = user.is_active
+    await message.answer(
+        f"📊 <b>Статистика</b>\n\n"
+        f"Откликов всего: <b>{total}</b>\n"
+        f"Сегодня: <b>{today}</b>\n"
+        f"Автоотклик: <b>{'работает' if active else 'остановлен'}</b>",
+        parse_mode="HTML",
+    )
+
+
+@router.message(F.text == BTN_SUPPORT)
+async def btn_support(message: Message, **kw):
+    await message.answer(
+        f"🆘 <b>Поддержка</b>\n\nПо любым вопросам пиши: {settings.support_contact}",
+        parse_mode="HTML",
+    )
+
+
+@router.message(F.text == BTN_PROJECTS)
+async def btn_projects(message: Message, **kw):
+    await message.answer(
+        "🚀 <b>Другие проекты</b>\n\n"
+        "🌊 <b>Volna VPN</b> — быстрый VPN без ограничений: @volnabbot",
+        parse_mode="HTML",
+    )
 
 
 @router.message(Command("task"))
