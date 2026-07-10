@@ -28,6 +28,10 @@ log = structlog.get_logger()
 
 _REFUSAL = ("не могу", "as an ai", "извините", "не имею возможности")
 
+# Потолок ИИ-оценок за один цикл на пользователя — защита от лишних трат/латентности
+# при широком поиске (умный отбор делает отдельный ИИ-запрос на каждую вакансию).
+MAX_SCORINGS_PER_CYCLE = 40
+
 
 async def _build_letter(item: dict, title: str, st, resume_text: str) -> str:
     """Собрать письмо по настройкам режима:
@@ -111,6 +115,7 @@ async def run_user_cycle(user_id: int) -> int:
                 u.hh_token_expires = datetime.fromtimestamp(client.new_token["expires_at"], tz=timezone.utc)
                 await session.commit()
 
+    scored = 0
     for item in items:
         if applied >= remaining:
             break
@@ -143,8 +148,12 @@ async def run_user_cycle(user_id: int) -> int:
 
         # Умный отбор: ИИ оценивает соответствие вакансии резюме и отсекает слабые.
         if getattr(st, "ai_score_enabled", False) and resume_text:
+            if scored >= MAX_SCORINGS_PER_CYCLE:
+                log.info("user_score_budget_reached", user_id=user_id, scored=scored)
+                break
             snip = item.get("snippet") or {}
             desc = " ".join(x for x in (snip.get("responsibility"), snip.get("requirement")) if x)
+            scored += 1
             score = await claude_ai.score_vacancy(title, desc, resume_text)
             if score < st.ai_score_min:
                 log.info("user_vacancy_skipped_low_score", user_id=user_id, vid=vid, score=score)

@@ -10,6 +10,11 @@ class Settings(BaseSettings):
     #   multi  — мультиюзерный (cloud SaaS): много пользователей, тарифы, per-user hh.
     mode: str = "single"
 
+    # Ключ шифрования чувствительных полей БД (hh-токены, tg-сессии) at-rest.
+    # Любая строка-парольная фраза; из неё детерминированно выводится ключ Fernet.
+    # Пусто = БЕЗ шифрования (обратная совместимость) — обязательно задай в проде!
+    encryption_key: str = ""
+
     # Telegram
     tg_bot_token: str = ""
     tg_admin_chat_id: str = ""

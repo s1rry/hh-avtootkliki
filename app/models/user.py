@@ -17,6 +17,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
 from app.models.user_settings import UserSettings
+from app.utils.crypto import EncryptedText
 
 
 class User(Base, TimestampMixin):
@@ -28,8 +29,8 @@ class User(Base, TimestampMixin):
 
     # hh-авторизация (per-user). TODO: шифровать токены at-rest.
     hh_connected: Mapped[bool] = mapped_column(Boolean, default=False)
-    hh_access_token: Mapped[str | None] = mapped_column(Text)
-    hh_refresh_token: Mapped[str | None] = mapped_column(Text)
+    hh_access_token: Mapped[str | None] = mapped_column(EncryptedText)
+    hh_refresh_token: Mapped[str | None] = mapped_column(EncryptedText)
     hh_token_expires: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     hh_resume_id: Mapped[str | None] = mapped_column(String(64))
 
@@ -40,8 +41,8 @@ class User(Base, TimestampMixin):
     # api_id/api_hash пользователь берёт на https://my.telegram.org/auth.
     # TODO: шифровать tg_session at-rest — это полный доступ к аккаунту.
     tg_api_id: Mapped[int | None] = mapped_column(BigInteger)
-    tg_api_hash: Mapped[str | None] = mapped_column(String(64))
-    tg_session: Mapped[str | None] = mapped_column(Text)      # StringSession
+    tg_api_hash: Mapped[str | None] = mapped_column(EncryptedText)
+    tg_session: Mapped[str | None] = mapped_column(EncryptedText)  # StringSession
     tg_userbot_active: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Настройки "Задачи" (см. UserSettings). Хранятся как JSON.

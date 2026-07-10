@@ -33,7 +33,7 @@ async def init_db():
             cols = {r[1] for r in (await conn.exec_driver_sql("PRAGMA table_info(users)")).fetchall()}
             add = {
                 "tg_api_id": "BIGINT",
-                "tg_api_hash": "VARCHAR(64)",
+                "tg_api_hash": "TEXT",
                 "tg_session": "TEXT",
                 "tg_userbot_active": "BOOLEAN DEFAULT 0",
             }
@@ -41,6 +41,18 @@ async def init_db():
                 if name not in cols:
                     await conn.exec_driver_sql(f"ALTER TABLE users ADD COLUMN {name} {ddl}")
                     log.info("db_migrate_add_column", column=name)
+    # Ограничить доступ к файлу БД (в нём токены/сессии) — только владелец.
+    if settings.database_url.startswith("sqlite"):
+        import os
+        path = settings.database_url.split(":///", 1)[-1]
+        try:
+            if path and os.path.exists(path):
+                os.chmod(path, 0o600)
+        except OSError as e:
+            log.warning("db_chmod_failed", error=str(e))
+    if not settings.encryption_key:
+        log.warning("encryption_key_not_set",
+                    hint="Задай ENCRYPTION_KEY в .env — токены/сессии хранятся без шифрования")
     log.info("database_initialized")
 
 
