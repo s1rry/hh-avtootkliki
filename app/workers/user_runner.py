@@ -39,6 +39,7 @@ async def _build_letter(item: dict, title: str, st, resume_text: str) -> str:
         return ""
     if mode == "required" and not item.get("response_letter_required"):
         return ""
+    contact = (getattr(st, "contact", "") or "").strip()
     if st.ai_enabled and resume_text:
         snip = item.get("snippet") or {}
         desc = " ".join(x for x in (snip.get("responsibility"), snip.get("requirement")) if x)
@@ -49,10 +50,12 @@ async def _build_letter(item: dict, title: str, st, resume_text: str) -> str:
             text = (text or "").strip()
             low = text.lower()
             if text and len(text) >= 40 and not any(m in low for m in _REFUSAL):
+                if contact:
+                    text += f"\n\nКонтакты: {contact}"
                 return text
         except Exception as e:
             log.warning("ai_letter_failed", error=str(e))
-    return render_letter(title)
+    return render_letter(title, contact=(contact or None))
 
 
 def _within_window(start: int, end: int) -> bool:

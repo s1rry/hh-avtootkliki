@@ -26,6 +26,21 @@ except ImportError:
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Лёгкая авто-миграция для существующей SQLite-БД: досоздаём новые
+        # колонки users (create_all не делает ALTER для уже созданных таблиц).
+        if settings.database_url.startswith("sqlite"):
+            from sqlalchemy import text
+            cols = {r[1] for r in (await conn.exec_driver_sql("PRAGMA table_info(users)")).fetchall()}
+            add = {
+                "tg_api_id": "BIGINT",
+                "tg_api_hash": "VARCHAR(64)",
+                "tg_session": "TEXT",
+                "tg_userbot_active": "BOOLEAN DEFAULT 0",
+            }
+            for name, ddl in add.items():
+                if name not in cols:
+                    await conn.exec_driver_sql(f"ALTER TABLE users ADD COLUMN {name} {ddl}")
+                    log.info("db_migrate_add_column", column=name)
     log.info("database_initialized")
 
 
@@ -77,9 +92,16 @@ async def main():
         from app.bot.hh_connect import router as hh_connect_router
         from app.bot.task_menu import router as task_menu_router
         from app.bot.payments import router as payments_router
+        from app.bot.userbot_connect import router as userbot_router
+        dp.include_router(userbot_router)     # /forwarding — второй ТГ (userbot)
         dp.include_router(task_menu_router)   # /start, /task, настройки
         dp.include_router(payments_router)    # pay:start, /grant
         dp.include_router(hh_connect_router)  # /connect (FSM телефон/код)
+
+        # Пер-юзерные userbot'ы: пересылка входящих ЛС со второго ТГ.
+        from app.userbot.manager import manager as userbot_manager
+        userbot_manager.bind_bot(bot)
+        asyncio.create_task(userbot_manager.start_all())
 
         # Вебхук ЮMoney (если настроен кошелёк)
         if settings.yoomoney_wallet and settings.yoomoney_secret:

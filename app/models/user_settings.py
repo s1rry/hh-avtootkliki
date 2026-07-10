@@ -28,6 +28,9 @@ class UserSettings(BaseModel):
     areas: list[int] = Field(default_factory=lambda: [1])
     # Слова-исключения (через запятую).
     excluded_text: str = ""
+    # Контакт для сопроводительных писем (например второй ТГ @username, почта,
+    # телефон). Подставляется в письмо, чтобы HR писал не на личный ТГ.
+    contact: str = ""
 
     # --- Условия работы ---
     # Формат работы (новый параметр hh work_format).

@@ -36,6 +36,14 @@ class User(Base, TimestampMixin):
     # Резюме (текст для писем/скоринга).
     resume_text: Mapped[str | None] = mapped_column(Text)
 
+    # Второй Telegram-аккаунт (userbot) — пересылка входящих ЛС от HR.
+    # api_id/api_hash пользователь берёт на https://my.telegram.org/auth.
+    # TODO: шифровать tg_session at-rest — это полный доступ к аккаунту.
+    tg_api_id: Mapped[int | None] = mapped_column(BigInteger)
+    tg_api_hash: Mapped[str | None] = mapped_column(String(64))
+    tg_session: Mapped[str | None] = mapped_column(Text)      # StringSession
+    tg_userbot_active: Mapped[bool] = mapped_column(Boolean, default=False)
+
     # Настройки "Задачи" (см. UserSettings). Хранятся как JSON.
     settings: Mapped[dict] = mapped_column(JSON, default=lambda: UserSettings().model_dump())
 

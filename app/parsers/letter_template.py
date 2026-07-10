@@ -38,15 +38,17 @@ def _expand_choices(text: str) -> str:
     return _CHOICE_RE.sub(lambda m: random.choice(m.group(1).split("|")), text)
 
 
-def render_letter(vacancy_name: str = "", template: str | None = None) -> str:
-    """Собрать готовое письмо из шаблона."""
+def render_letter(vacancy_name: str = "", template: str | None = None, contact: str | None = None) -> str:
+    """Собрать готовое письмо из шаблона.
+
+    contact — контакт для связи (в мультиюзере из настроек пользователя).
+    Если None, берётся глобальный settings.contacts; если и он пуст — строка опускается.
+    """
     text = _expand_choices(template or DEFAULT_TEMPLATE)
     name = (vacancy_name or "").strip()
     suffix = f" «{name}»" if name else ""
     text = text.replace("%(vacancy_suffix)s", suffix)
     text = text.replace("%(vacancy_name)s", name)
-    # Контакты берутся из настроек (в мультиюзере — из профиля пользователя).
-    # Если не заданы, строка контактов просто опускается.
-    contacts = (settings.contacts or "").strip()
+    contacts = (contact if contact is not None else settings.contacts or "").strip()
     text = text.replace("%(contacts)s", f"\n\nКонтакты: {contacts}" if contacts else "")
     return text.rstrip()
