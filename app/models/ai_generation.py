@@ -8,6 +8,7 @@ class AIGeneration(Base, TimestampMixin):
     __tablename__ = "ai_generations"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     vacancy_id: Mapped[int | None] = mapped_column(ForeignKey("vacancies.id"))
     gen_type: Mapped[str] = mapped_column(String(50))  # analysis / cover_letter / reply
     prompt: Mapped[str] = mapped_column(Text)

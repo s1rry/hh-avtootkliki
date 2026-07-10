@@ -1,8 +1,13 @@
 import json
 from pathlib import Path
 
-import anthropic
+import httpx
 import structlog
+
+try:
+    import anthropic
+except ImportError:  # self-host на groq может не ставить anthropic
+    anthropic = None
 
 from app.config import settings
 from app.ai.prompts import (
@@ -15,22 +20,27 @@ from app.ai.prompts import (
 log = structlog.get_logger()
 
 MODEL = "claude-sonnet-4-6"
+# Модель для прохождения тестов вакансий (ответы на вопросы/тесты работодателя)
+TEST_MODEL = "claude-haiku-4-5"
 AI_STATE_FILE = Path("data/ai_state.json")
 
 
 class ClaudeAI:
     def __init__(self):
-        primary_kwargs = {"api_key": settings.anthropic_api_key}
-        if settings.anthropic_base_url:
-            primary_kwargs["base_url"] = settings.anthropic_base_url
-        self.primary = anthropic.AsyncAnthropic(**primary_kwargs)
-
+        self.primary = None
         self.fallback = None
-        if settings.anthropic_fallback_api_key:
-            fb_kwargs = {"api_key": settings.anthropic_fallback_api_key}
-            if settings.anthropic_fallback_base_url:
-                fb_kwargs["base_url"] = settings.anthropic_fallback_base_url
-            self.fallback = anthropic.AsyncAnthropic(**fb_kwargs)
+        # Anthropic-клиенты создаём только если выбран этот провайдер.
+        if settings.ai_provider == "anthropic" and anthropic is not None:
+            primary_kwargs = {"api_key": settings.anthropic_api_key}
+            if settings.anthropic_base_url:
+                primary_kwargs["base_url"] = settings.anthropic_base_url
+            self.primary = anthropic.AsyncAnthropic(**primary_kwargs)
+
+            if settings.anthropic_fallback_api_key:
+                fb_kwargs = {"api_key": settings.anthropic_fallback_api_key}
+                if settings.anthropic_fallback_base_url:
+                    fb_kwargs["base_url"] = settings.anthropic_fallback_base_url
+                self.fallback = anthropic.AsyncAnthropic(**fb_kwargs)
 
         # Persistent flag — once primary is exhausted we stick to fallback
         self.use_fallback = self._load_use_fallback()
@@ -71,15 +81,41 @@ class ClaudeAI:
                 return text
         return ""
 
-    async def _call(self, system: str, user_message: str, max_tokens: int = 1024) -> tuple[str, int, int]:
+    async def _call_openai_compatible(self, system: str, user_message: str, max_tokens: int) -> tuple[str, int, int]:
+        """Вызов любого OpenAI-совместимого эндпоинта (OpenRouter/Cerebras/Mistral/…)."""
+        headers = {
+            "Authorization": f"Bearer {settings.ai_api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": settings.ai_model,
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_message},
+            ],
+        }
+        async with httpx.AsyncClient(timeout=60) as c:
+            r = await c.post(f"{settings.ai_base_url}/chat/completions", headers=headers, json=payload)
+        r.raise_for_status()
+        d = r.json()
+        text = (d.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
+        usage = d.get("usage") or {}
+        return text, usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
+
+    async def _call(self, system: str, user_message: str, max_tokens: int = 1024, model: str | None = None) -> tuple[str, int, int]:
         # Minimum sane budget — small max_tokens makes models return empty content
         if max_tokens < 800:
             max_tokens = 800
 
+        # OpenAI-совместимый провайдер (по умолчанию для облака/self-host).
+        if settings.ai_provider != "anthropic":
+            return await self._call_openai_compatible(system, user_message, max_tokens)
+
         # Permanent fallback: if primary was exhausted before, go straight to fallback.
         if self.use_fallback and self.fallback:
             response = await self.fallback.messages.create(
-                model=MODEL, max_tokens=max_tokens, system=system,
+                model=model or MODEL, max_tokens=max_tokens, system=system,
                 messages=[{"role": "user", "content": user_message}],
             )
             text = self._extract_text(response)
@@ -87,7 +123,7 @@ class ClaudeAI:
 
         try:
             response = await self.primary.messages.create(
-                model=MODEL, max_tokens=max_tokens, system=system,
+                model=model or MODEL, max_tokens=max_tokens, system=system,
                 messages=[{"role": "user", "content": user_message}],
             )
             text = self._extract_text(response)
@@ -100,7 +136,7 @@ class ClaudeAI:
                 self.use_fallback = True
                 self._save_use_fallback()
                 response = await self.fallback.messages.create(
-                    model=MODEL, max_tokens=max_tokens, system=system,
+                    model=model or MODEL, max_tokens=max_tokens, system=system,
                     messages=[{"role": "user", "content": user_message}],
                 )
                 text = self._extract_text(response)
@@ -144,8 +180,8 @@ class ClaudeAI:
                 "_output_tokens": out_tok,
             }
 
-    async def generate_cover_letter(self, vacancy_title: str, vacancy_description: str, company_name: str = "") -> tuple[str, int, int]:
-        system = SYSTEM_COVER_LETTER.format(resume=settings.resume_text)
+    async def generate_cover_letter(self, vacancy_title: str, vacancy_description: str, company_name: str = "", resume: str | None = None) -> tuple[str, int, int]:
+        system = SYSTEM_COVER_LETTER.format(resume=resume or settings.resume_text)
         user_msg = f"""Напиши сопроводительное письмо для вакансии:
 
 Компания: {company_name}

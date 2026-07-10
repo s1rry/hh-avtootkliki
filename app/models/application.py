@@ -20,6 +20,7 @@ class Application(Base, TimestampMixin):
     __table_args__ = (Index("ix_applications_status", "status"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     vacancy_id: Mapped[int] = mapped_column(ForeignKey("vacancies.id"))
     vacancy: Mapped["Vacancy"] = relationship(back_populates="applications")  # noqa: F821
 

@@ -20,11 +20,15 @@ class VacancyStatus(str, enum.Enum):
 class Vacancy(Base, TimestampMixin):
     __tablename__ = "vacancies"
     __table_args__ = (
-        Index("ix_vacancies_platform_ext", "platform", "external_id", unique=True),
+        # В мультиюзере одну вакансию могут отслеживать разные пользователи,
+        # поэтому уникальность — в пределах пользователя.
+        Index("ix_vacancies_user_platform_ext", "user_id", "platform", "external_id", unique=True),
         Index("ix_vacancies_status", "status"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # Владелец записи. Nullable до полного перехода на мультиюзер (Фаза 3).
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     platform: Mapped[str] = mapped_column(String(50))  # hh / workspace / geekjob
     external_id: Mapped[str] = mapped_column(String(200))
     url: Mapped[str] = mapped_column(String(1000))
@@ -35,6 +39,7 @@ class Vacancy(Base, TimestampMixin):
     salary_currency: Mapped[str | None] = mapped_column(String(10))
     location: Mapped[str | None] = mapped_column(String(300))
     is_remote: Mapped[bool] = mapped_column(Boolean, default=False)
+    work_format: Mapped[str | None] = mapped_column(String(20))  # remote | hybrid | office
     experience: Mapped[str | None] = mapped_column(String(100))
     employment_type: Mapped[str | None] = mapped_column(String(100))
     skills: Mapped[str | None] = mapped_column(Text)  # JSON array as text

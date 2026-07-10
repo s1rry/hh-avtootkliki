@@ -81,8 +81,46 @@ class WorkerScheduler:
         if self.notify and not self._is_quiet_hours():
             await self.notify(text)
 
+    async def _job_all_users(self):
+        """Мультиюзер: прогнать автоотклик по каждому активному пользователю."""
+        from sqlalchemy import select
+        from app.database import async_session
+        from app.models.user import User
+        from app.workers.user_runner import run_user_cycle
+
+        async with async_session() as session:
+            user_ids = (await session.execute(
+                select(User.id).where(User.is_active.is_(True), User.hh_connected.is_(True))
+            )).scalars().all()
+        for uid in user_ids:
+            try:
+                await run_user_cycle(uid)
+            except Exception as e:
+                log.error("user_cycle_failed", user_id=uid, error=str(e))
+
+    def _start_multi(self, interval: int):
+        """Планировщик мультиюзерного режима: один общий цикл по пользователям."""
+        from datetime import datetime, timedelta
+        self.scheduler.add_job(
+            self._job_all_users,
+            "interval",
+            seconds=interval,
+            id="multi_apply",
+            name="Автоотклик (мультиюзер)",
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=60,
+            next_run_time=datetime.now(MSK) + timedelta(seconds=30),
+        )
+        self.scheduler.start()
+        log.info("scheduler_started_multi", interval=interval)
+
     def start(self):
         interval = settings.check_interval_sec
+
+        if settings.mode == "multi":
+            self._start_multi(interval)
+            return
 
         self.scheduler.add_job(
             self._job_search,
@@ -337,7 +375,7 @@ class WorkerScheduler:
             from app.parsers.habr_playwright import habr_playwright
 
             PLATFORM_LABEL = {"hh": "hh.ru", "habr": "Хабр Карьера"}
-            ALERT_COOLDOWN = timedelta(minutes=60)
+            ALERT_COOLDOWN = timedelta(hours=12)
             now = datetime.now(MSK)
 
             # Собираем актуальный статус по платформам
@@ -367,14 +405,16 @@ class WorkerScheduler:
             # 2. Habr (Playwright) — проверяем только если cap>0
             if settings.max_applies_per_day_habr > 0 and habr_playwright:
                 habr_ok = False
-                for attempt in range(2):
-                    try:
-                        habr_ok = await habr_playwright.is_logged_in()
-                        if habr_ok:
-                            break
-                    except Exception as e:
-                        log.warning("login_health_habr_check_error", attempt=attempt + 1, error=str(e))
-                        habr_ok = False
+                try:
+                    habr_ok = await habr_playwright.is_logged_in()
+                    if not habr_ok:
+                        # Сессия слетела — пробуем перелогиниться (как при отклике).
+                        # Алертим только если и повторный логин не удался,
+                        # иначе на каждый сброс cookie летел ложный «слетела».
+                        habr_ok = await habr_playwright.login()
+                except Exception as e:
+                    log.warning("login_health_habr_check_error", error=str(e))
+                    habr_ok = False
                 status["habr"] = habr_ok
 
             newly_broken: list[str] = []   # сессии, которые СЕЙЧАС слетели (для уведомления)
@@ -426,7 +466,9 @@ class WorkerScheduler:
                 lines.append("")
                 lines.append("Перелогинься через VNC, бот сам подхватит сессию.")
                 msg = "\n".join(lines)
-                if self.notify:
+                # Тихие часы (МСК 22–9): ночью не шлём и НЕ обновляем таймстамп,
+                # чтобы утром пришло один раз, а не копилось всю ночь.
+                if self.notify and not self._is_quiet_hours():
                     try:
                         await self.notify(msg)
                         for p in to_notify:
