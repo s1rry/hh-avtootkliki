@@ -5,6 +5,11 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
+    # Режим работы:
+    #   single — одиночный (self-host): один пользователь из .env, полный функционал.
+    #   multi  — мультиюзерный (cloud SaaS): много пользователей, тарифы, per-user hh.
+    mode: str = "single"
+
     # Telegram
     tg_bot_token: str = ""
     tg_admin_chat_id: str = ""
@@ -16,12 +21,36 @@ class Settings(BaseSettings):
     telegram_api_hash: str = ""
     telegram_session_string: str = ""
 
+    # AI-провайдер: anthropic | openai (любой OpenAI-совместимый эндпоинт).
+    # По умолчанию openai-совместимый — работает с OpenRouter, Cerebras, Gemini
+    # (openai-endpoint), Mistral и т.п. При блокировке одного меняем только URL/ключ/модель.
+    ai_provider: str = "openai"
+
     # Anthropic
     anthropic_api_key: str = ""
     anthropic_base_url: str = ""
     # Fallback used automatically when the primary returns insufficient_quota
     anthropic_fallback_api_key: str = ""
     anthropic_fallback_base_url: str = ""
+
+    # OpenAI-совместимый провайдер (используется при ai_provider=openai).
+    # По умолчанию Cerebras (бесплатный, быстрый, доступен из РФ).
+    # Ключ: https://cloud.cerebras.ai. Меняется на любой совместимый в .env.
+    ai_api_key: str = ""
+    ai_base_url: str = "https://api.cerebras.ai/v1"
+    ai_model: str = "gpt-oss-120b"
+
+    # === Оплата (мультиюзер) ===
+    subscription_price: int = 100          # цена расширенного тарифа, ₽
+    subscription_days: int = 30            # срок за одну оплату
+    # ЮMoney: номер кошелька и секрет HTTP-уведомлений (в настройках кошелька).
+    yoomoney_wallet: str = ""
+    yoomoney_secret: str = ""
+    # Крипто-адреса для ручной оплаты (подтверждает админ).
+    crypto_ton: str = ""
+    crypto_usdt_trc20: str = ""
+    # Порт локального веб-сервера для вебхука ЮMoney.
+    payment_webhook_port: int = 8088
 
     # Database
     database_url: str = "sqlite+aiosqlite:///data/jobhunter.db"

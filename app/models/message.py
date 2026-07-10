@@ -9,6 +9,7 @@ class RecruiterMessage(Base, TimestampMixin):
     __table_args__ = (Index("ix_messages_unread", "is_read"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     vacancy_id: Mapped[int | None] = mapped_column(ForeignKey("vacancies.id"))
     vacancy: Mapped["Vacancy | None"] = relationship(back_populates="messages")  # noqa: F821
 

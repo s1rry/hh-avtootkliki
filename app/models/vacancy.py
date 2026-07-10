@@ -20,11 +20,15 @@ class VacancyStatus(str, enum.Enum):
 class Vacancy(Base, TimestampMixin):
     __tablename__ = "vacancies"
     __table_args__ = (
-        Index("ix_vacancies_platform_ext", "platform", "external_id", unique=True),
+        # В мультиюзере одну вакансию могут отслеживать разные пользователи,
+        # поэтому уникальность — в пределах пользователя.
+        Index("ix_vacancies_user_platform_ext", "user_id", "platform", "external_id", unique=True),
         Index("ix_vacancies_status", "status"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # Владелец записи. Nullable до полного перехода на мультиюзер (Фаза 3).
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     platform: Mapped[str] = mapped_column(String(50))  # hh / workspace / geekjob
     external_id: Mapped[str] = mapped_column(String(200))
     url: Mapped[str] = mapped_column(String(1000))

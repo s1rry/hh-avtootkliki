@@ -4,21 +4,23 @@
 
 Самый простой путь это Docker, он одинаково работает везде и сам поднимает базу и Redis. Если Docker не хочешь, ниже есть ручная установка.
 
+Self-host это одиночный режим (`MODE=single`): полный функционал бесплатно, свой бот, свой ИИ-ключ, свой аккаунт hh. Платить ничего не нужно.
+
 ## 1. Что подготовить заранее (ключи)
 
 | Ключ в `.env` | Что это и где взять |
 |---|---|
+| `MODE` | Оставь `single` (одиночный режим для себя) |
 | `TG_BOT_TOKEN` | Токен Telegram-бота. В @BotFather команда /newbot, скопировать токен |
 | `TG_ADMIN_CHAT_ID` | Твой числовой Telegram ID. Узнать в @userinfobot |
-| `ANTHROPIC_API_KEY` | Ключ Claude. Если из России, добавь ещё строку `ANTHROPIC_BASE_URL=` с адресом своего релея |
-| `HH_LOGIN` / `HH_PASSWORD` | Почта и пароль от hh.ru |
-| `HABR_LOGIN` / `HABR_PASSWORD` | Только если нужен Хабр, иначе оставь пустыми |
-| `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` | Для чтения сообщений рекрутёров. Взять на my.telegram.org в разделе API development tools |
-| `TELEGRAM_SESSION_STRING` | Строка сессии Telethon, генерится при первом входе |
-| `RESUME_TEXT_PATH` | Оставь `configs/resume.txt`, и положи туда текст резюме |
-| `DESIRED_POSITION`, `DESIRED_SALARY_MIN`, `DESIRED_SALARY_MAX` | Желаемая должность и вилка зарплаты |
+| `AI_API_KEY` | Ключ ИИ. По умолчанию Cerebras (бесплатно): https://cloud.cerebras.ai. Любой OpenAI-совместимый — тогда поменяй ещё `AI_BASE_URL` и `AI_MODEL` |
+| `CONTACTS` | Контакты для подписи в письмах, напр. `email@mail.ru, tg @nick` |
+| `RESUME_TEXT_PATH` | Оставь `configs/resume.txt`, положи туда резюме: `cp configs/resume.example.txt configs/resume.txt` |
+| `DESIRED_SALARY_MIN`, `DESIRED_SALARY_MAX` | Вилка зарплаты |
 | `MAX_APPLIES_PER_DAY`, `MIN_DELAY_SEC`, `MAX_DELAY_SEC` | Антибан, оставь как в примере |
 | `DATABASE_URL`, `REDIS_URL` | Если ставишь через Docker, не трогай |
+
+hh.ru **не требует логина/пароля** — вход по одноразовому коду прямо из бота (раздел 4). Хабр и второй Telegram-аккаунт для чтения сообщений опциональны (см. `.env.example`).
 
 ## 2. Установка через Docker (рекомендуется)
 
@@ -30,7 +32,7 @@
 2. Склонируй проект и подготовь конфиг:
    ```bash
    git clone https://github.com/s1rry/hhautoapply.git
-   cd job-hunter
+   cd hhautoapply
    cp .env.example .env
    ```
 3. Открой `.env` и заполни ключи из таблицы выше. Положи текст резюме в `configs/resume.txt`.
@@ -53,7 +55,7 @@ brew install python@3.12 postgresql@16 redis
 brew services start postgresql@16
 brew services start redis
 git clone https://github.com/s1rry/hhautoapply.git
-cd job-hunter
+cd hhautoapply
 python3.12 -m venv .venv
 .venv/bin/pip install -e .
 .venv/bin/playwright install chromium
@@ -68,7 +70,7 @@ cp .env.example .env   # заполни ключи
 3. В PowerShell:
    ```powershell
    git clone https://github.com/s1rry/hhautoapply.git
-   cd job-hunter
+   cd hhautoapply
    py -3.12 -m venv .venv
    .venv\Scripts\pip install -e .
    .venv\Scripts\playwright install chromium
@@ -83,7 +85,7 @@ cp .env.example .env   # заполни ключи
 sudo apt update
 sudo apt install -y python3.12 python3.12-venv git postgresql redis-server
 git clone https://github.com/s1rry/hhautoapply.git
-cd job-hunter
+cd hhautoapply
 python3.12 -m venv .venv
 .venv/bin/pip install -e .
 .venv/bin/playwright install chromium
@@ -95,18 +97,18 @@ cp .env.example .env   # заполни ключи
 
 ## 4. Первый вход на hh (один раз)
 
-hh пускает по сохранённой сессии браузера. На десктопе это просто:
-```bash
-.venv/bin/python manual_login.py
-```
-Откроется браузер, залогинься руками на hh, скрипт сохранит сессию в `data/browser_sessions/`. После этого автоотклики работают сами. Для Хабра аналогично `manual_login_habr.py`.
+Проще всего прямо из бота, работает и на VPS без экрана:
 
-На VPS без экрана запусти этот скрипт под Xvfb и подключись по x11vnc, чтобы пройти вход.
+1. Напиши своему боту в Telegram `/login`.
+2. Пришли номер телефона, привязанный к hh. hh отправит одноразовый код.
+3. Пришли код боту. Всё — токен сохранится, автоотклики заработают.
+
+Пароль вводить не нужно. Токен сам обновляется. Для Хабра (если включаешь) — вход через `manual_login_habr.py` под Xvfb/VNC.
 
 ## 5. Обновление
 
 ```bash
-cd job-hunter
+cd hhautoapply
 git pull
 docker compose up -d --build   # для Docker
 # или перезапусти процесс python для ручной установки

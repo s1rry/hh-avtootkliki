@@ -1,0 +1,309 @@
+"""
+UI настройки автоотклика ("Задача") для мультиюзерного режима (Фаза 5).
+
+/task показывает меню: ключевые слова, регион, формат, опыт, занятость,
+зарплата, слова-исключения, ИИ-письма, лимит, расписание, тумблер автоотклика
+и кнопку тарифа. Множественный выбор — переключатели, числа/текст — ввод (FSM).
+"""
+from __future__ import annotations
+
+import structlog
+from aiogram import Router, F
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+
+from app.database import async_session
+from app.models.user_settings import UserSettings
+from app.services.user_service import get_or_create_user
+
+log = structlog.get_logger()
+
+router = Router()
+
+WORK_FORMAT = {"ON_SITE": "На месте", "REMOTE": "Удалённо", "HYBRID": "Гибрид", "FIELD_WORK": "Разъездной"}
+EXPERIENCE = {"noExperience": "Нет опыта", "between1And3": "1–3 года", "between3And6": "3–6 лет", "moreThan6": "6+ лет"}
+EMPLOYMENT = {"full": "Полная", "part": "Частичная", "project": "Проект", "probation": "Стажировка"}
+GROUPS = {"fmt": ("work_format", WORK_FORMAT), "exp": ("experience", EXPERIENCE), "emp": ("employment", EMPLOYMENT)}
+
+AREAS = {
+    "москва": 1, "санкт-петербург": 2, "спб": 2, "питер": 2, "россия": 113, "вся россия": 113,
+    "новосибирск": 4, "екатеринбург": 3, "казань": 88, "кемерово": 1229,
+    "нижний новгород": 66, "краснодар": 53, "самара": 78, "ростов-на-дону": 76,
+}
+AREA_NAMES = {1: "Москва", 2: "Санкт-Петербург", 113: "Вся Россия", 4: "Новосибирск",
+              3: "Екатеринбург", 88: "Казань", 1229: "Кемерово", 66: "Нижний Новгород",
+              53: "Краснодар", 78: "Самара", 76: "Ростов-на-Дону"}
+
+FREE_DAILY_LIMIT = 50
+PAID_DAILY_LIMIT = 200
+
+
+class TaskInput(StatesGroup):
+    value = State()
+
+
+async def _load(session, cb_or_msg):
+    tg = cb_or_msg.from_user
+    return await get_or_create_user(session, tg.id, tg.username)
+
+
+def _summary(s: UserSettings) -> str:
+    areas = ", ".join(AREA_NAMES.get(a, str(a)) for a in s.areas) or "не задан"
+    fmt = ", ".join(WORK_FORMAT[c] for c in s.work_format) or "любой"
+    exp = ", ".join(EXPERIENCE[c] for c in s.experience) or "любой"
+    emp = ", ".join(EMPLOYMENT[c] for c in s.employment) or "любая"
+    return (
+        f"🔑 Ключевые слова: <b>{s.search_text or 'аналитик (по умолчанию)'}</b>\n"
+        f"📍 Регион: <b>{areas}</b>\n"
+        f"💻 Формат: <b>{fmt}</b>\n"
+        f"📈 Опыт: <b>{exp}</b>\n"
+        f"🕒 Занятость: <b>{emp}</b>\n"
+        f"💰 Зарплата от: <b>{s.salary_min or '—'}</b>\n"
+        f"🚫 Исключения: <b>{s.excluded_text or '—'}</b>\n"
+        f"🤖 ИИ-письма: <b>{'вкл' if s.ai_enabled else 'выкл'}</b>\n"
+        f"📊 Лимит/день: <b>{s.daily_limit}</b>\n"
+        f"⏰ Окно: <b>{s.apply_hour_start}:00–{s.apply_hour_end}:00 МСК</b>"
+    )
+
+
+def _main_kb(is_active: bool) -> InlineKeyboardMarkup:
+    b = InlineKeyboardButton
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [b(text=("⏸ Остановить автоотклик" if is_active else "▶️ Запустить автоотклик"),
+           callback_data="task:toggle_active")],
+        [b(text="🔑 Ключевые слова", callback_data="task:input:search_text"),
+         b(text="📍 Регион", callback_data="task:input:areas")],
+        [b(text="💻 Формат", callback_data="task:sub:fmt"),
+         b(text="📈 Опыт", callback_data="task:sub:exp")],
+        [b(text="🕒 Занятость", callback_data="task:sub:emp"),
+         b(text="💰 Зарплата", callback_data="task:input:salary_min")],
+        [b(text="🚫 Исключения", callback_data="task:input:excluded_text"),
+         b(text="📊 Лимит/день", callback_data="task:input:daily_limit")],
+        [b(text="⏰ Расписание", callback_data="task:input:window"),
+         b(text="🤖 ИИ-письма", callback_data="task:toggle_ai")],
+        [b(text="💎 Тариф", callback_data="task:tariff")],
+    ])
+
+
+async def _show_main(target, s: UserSettings, is_active: bool, edit=False):
+    text = "⚙️ <b>Задача автоотклика</b>\n\n" + _summary(s)
+    kb = _main_kb(is_active)
+    if edit and isinstance(target, CallbackQuery):
+        await target.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    else:
+        msg = target.message if isinstance(target, CallbackQuery) else target
+        await msg.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.message(Command("start"))
+async def cmd_start(message: Message, state: FSMContext, **kw):
+    await state.clear()
+    async with async_session() as session:
+        user = await _load(session, message)
+        connected = user.hh_connected
+        s, active = user.get_settings(), user.is_active
+    if not connected:
+        await message.answer(
+            "👋 <b>Привет! Это бот авто-откликов на hh.ru</b>\n\n"
+            "Он сам ищет вакансии по твоим фильтрам и откликается за тебя.\n\n"
+            "Шаг 1 — подключи свой hh.ru: /connect\n"
+            "Шаг 2 — настрой задачу: /task\n\n"
+            "Пароль вводить не нужно, только код от hh.",
+            parse_mode="HTML",
+        )
+    else:
+        await _show_main(message, s, active)
+
+
+@router.message(Command("task"))
+async def cmd_task(message: Message, state: FSMContext, **kw):
+    await state.clear()
+    async with async_session() as session:
+        user = await _load(session, message)
+        if not user.hh_connected:
+            await message.answer("Сначала подключи hh.ru: /connect")
+            return
+        await _show_main(message, user.get_settings(), user.is_active)
+
+
+@router.callback_query(F.data == "task:menu")
+async def cb_menu(cb: CallbackQuery, state: FSMContext, **kw):
+    await state.clear()
+    async with async_session() as session:
+        user = await _load(session, cb)
+        await _show_main(cb, user.get_settings(), user.is_active, edit=True)
+    await cb.answer()
+
+
+@router.callback_query(F.data == "task:toggle_active")
+async def cb_toggle_active(cb: CallbackQuery, **kw):
+    async with async_session() as session:
+        user = await _load(session, cb)
+        if not user.hh_connected:
+            await cb.answer("Сначала подключи hh: /connect", show_alert=True)
+            return
+        user.is_active = not user.is_active
+        await session.commit()
+        state_on = user.is_active
+        s = user.get_settings()
+    await _show_main(cb, s, state_on, edit=True)
+    await cb.answer("Автоотклик запущен" if state_on else "Автоотклик остановлен")
+
+
+@router.callback_query(F.data == "task:toggle_ai")
+async def cb_toggle_ai(cb: CallbackQuery, **kw):
+    async with async_session() as session:
+        user = await _load(session, cb)
+        s = user.get_settings()
+        s.ai_enabled = not s.ai_enabled
+        user.set_settings(s)
+        await session.commit()
+        active = user.is_active
+    await _show_main(cb, s, active, edit=True)
+    await cb.answer("ИИ-письма включены" if s.ai_enabled else "ИИ-письма выключены")
+
+
+# ── Подменю множественного выбора (формат/опыт/занятость) ──
+def _sub_kb(group: str, selected: list[str]) -> InlineKeyboardMarkup:
+    field, options = GROUPS[group]
+    rows = []
+    for code, label in options.items():
+        mark = "✅ " if code in selected else "▫️ "
+        rows.append([InlineKeyboardButton(text=mark + label, callback_data=f"task:tog:{group}:{code}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="task:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data.startswith("task:sub:"))
+async def cb_sub(cb: CallbackQuery, **kw):
+    group = cb.data.split(":")[2]
+    field, _ = GROUPS[group]
+    async with async_session() as session:
+        user = await _load(session, cb)
+        selected = getattr(user.get_settings(), field)
+    await cb.message.edit_text(
+        "Отметь нужные варианты (можно несколько):",
+        reply_markup=_sub_kb(group, selected),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("task:tog:"))
+async def cb_tog(cb: CallbackQuery, **kw):
+    _, _, group, code = cb.data.split(":")
+    field, _ = GROUPS[group]
+    async with async_session() as session:
+        user = await _load(session, cb)
+        s = user.get_settings()
+        cur = list(getattr(s, field))
+        if code in cur:
+            cur.remove(code)
+        else:
+            cur.append(code)
+        setattr(s, field, cur)
+        user.set_settings(s)
+        await session.commit()
+        selected = cur
+    await cb.message.edit_reply_markup(reply_markup=_sub_kb(group, selected))
+    await cb.answer()
+
+
+# ── Ввод значений (FSM) ──
+_PROMPTS = {
+    "search_text": "Пришли ключевые слова для поиска (например: <code>системный аналитик</code>). Пусто = по умолчанию.",
+    "areas": "Пришли город (например: <code>Москва</code>, <code>СПб</code>, <code>вся Россия</code>).",
+    "salary_min": "Пришли минимальную зарплату числом (например: <code>200000</code>). 0 = без ограничения.",
+    "excluded_text": "Пришли слова-исключения через запятую (например: <code>1С, junior</code>).",
+    "daily_limit": "Пришли лимит откликов в день числом.",
+    "window": "Пришли окно откликов в формате <code>9-21</code> (часы МСК).",
+}
+
+
+@router.callback_query(F.data.startswith("task:input:"))
+async def cb_input(cb: CallbackQuery, state: FSMContext, **kw):
+    field = cb.data.split(":")[2]
+    await state.set_state(TaskInput.value)
+    await state.update_data(field=field)
+    await cb.message.answer(_PROMPTS.get(field, "Пришли значение:") + "\n\nОтмена: /task", parse_mode="HTML")
+    await cb.answer()
+
+
+@router.message(TaskInput.value)
+async def on_value(message: Message, state: FSMContext, **kw):
+    data = await state.get_data()
+    field = data.get("field")
+    raw = (message.text or "").strip()
+    err = None
+    async with async_session() as session:
+        user = await _load(session, message)
+        s = user.get_settings()
+        if field == "search_text":
+            s.search_text = raw
+        elif field == "excluded_text":
+            s.excluded_text = raw
+        elif field == "areas":
+            aid = AREAS.get(raw.lower())
+            if aid:
+                s.areas = [aid]
+            else:
+                err = "Не узнал город. Попробуй: Москва, СПб, вся Россия и т.п."
+        elif field == "salary_min":
+            if raw.isdigit():
+                s.salary_min = int(raw)
+            else:
+                err = "Нужно число."
+        elif field == "daily_limit":
+            if raw.isdigit():
+                cap = PAID_DAILY_LIMIT if user.is_paid else FREE_DAILY_LIMIT
+                val = min(int(raw), cap)
+                s.daily_limit = val
+                if int(raw) > cap and not user.is_paid:
+                    err = f"На бесплатном тарифе максимум {FREE_DAILY_LIMIT}/день. Поставил {val}. Больше — в тарифе 💎"
+            else:
+                err = "Нужно число."
+        elif field == "window":
+            try:
+                a, b = raw.replace(" ", "").split("-")
+                a, b = int(a), int(b)
+                if 0 <= a < b <= 24:
+                    s.apply_hour_start, s.apply_hour_end = a, b
+                else:
+                    err = "Диапазон должен быть 0–24 и начало меньше конца."
+            except Exception:
+                err = "Формат: 9-21"
+        if err is None or field in ("daily_limit",):
+            user.set_settings(s)
+            await session.commit()
+        active = user.is_active
+        s_final = user.get_settings()
+    await state.clear()
+    if err:
+        await message.answer("⚠️ " + err)
+    await _show_main(message, s_final, active)
+
+
+@router.callback_query(F.data == "task:tariff")
+async def cb_tariff(cb: CallbackQuery, **kw):
+    async with async_session() as session:
+        user = await _load(session, cb)
+        paid = user.is_paid
+    text = (
+        "💎 <b>Тариф</b>\n\n"
+        f"Сейчас: <b>{'Расширенный' if paid else 'Бесплатный'}</b>\n\n"
+        "Бесплатный:\n"
+        f"• 1 аккаунт hh, до {FREE_DAILY_LIMIT} откликов/день\n"
+        "• ИИ-письма, статистика, анализ вакансий\n\n"
+        "Расширенный (100₽/мес):\n"
+        "• несколько hh-аккаунтов\n"
+        f"• до {PAID_DAILY_LIMIT} откликов/день\n"
+        "• чаще проверка и приоритет\n"
+        "• расширенная статистика и напоминания\n"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Оформить за 100₽", callback_data="pay:start")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="task:menu")],
+    ])
+    await cb.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await cb.answer()

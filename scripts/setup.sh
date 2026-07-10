@@ -6,7 +6,14 @@ echo "=== Job Hunter Setup ==="
 # Копируем env если нет
 if [ ! -f .env ]; then
     cp .env.example .env
-    echo "✓ Создан .env — заполни его перед запуском"
+    echo "✓ Создан .env — заполни его перед запуском (MODE=single, TG_BOT_TOKEN, AI_API_KEY)"
+fi
+
+# Копируем шаблон резюме если нет
+if [ ! -f configs/resume.txt ]; then
+    mkdir -p configs
+    cp configs/resume.example.txt configs/resume.txt 2>/dev/null || true
+    echo "✓ Создан configs/resume.txt из шаблона — впиши своё резюме"
 fi
 
 # Устанавливаем зависимости
@@ -23,7 +30,7 @@ echo "✓ Директории созданы"
 
 echo ""
 echo "=== Готово! ==="
-echo "1. Заполни .env файл"
-echo "2. Отредактируй configs/resume.txt"
-echo "3. Запуск: python -m app.main"
-echo "4. Или через Docker: docker compose up -d"
+echo "1. Заполни .env (MODE=single, TG_BOT_TOKEN, AI_API_KEY — ключ Cerebras бесплатно на cloud.cerebras.ai)"
+echo "2. Впиши своё резюме в configs/resume.txt"
+echo "3. Запуск: python -m app.main   (или Docker: docker compose up -d)"
+echo "4. В боте: /login — вход на hh по коду (телефон -> код), пароль не нужен"

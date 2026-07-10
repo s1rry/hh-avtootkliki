@@ -1,6 +1,7 @@
 import asyncio
 
 import structlog
+from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -70,6 +71,25 @@ async def main():
         log.info("using_tg_proxy", proxy=settings.tg_proxy)
     bot = Bot(token=settings.tg_bot_token, session=session)
     dp = Dispatcher()
+    # В мультиюзерном режиме сначала подключаем per-user роутер hh-подключения,
+    # чтобы /connect и его FSM (телефон/код) обрабатывались для всех пользователей.
+    if settings.mode == "multi":
+        from app.bot.hh_connect import router as hh_connect_router
+        from app.bot.task_menu import router as task_menu_router
+        from app.bot.payments import router as payments_router
+        dp.include_router(task_menu_router)   # /start, /task, настройки
+        dp.include_router(payments_router)    # pay:start, /grant
+        dp.include_router(hh_connect_router)  # /connect (FSM телефон/код)
+
+        # Вебхук ЮMoney (если настроен кошелёк)
+        if settings.yoomoney_wallet and settings.yoomoney_secret:
+            from app.api.payment_webhook import create_payment_app
+            pay_app = create_payment_app(bot)
+            runner = web.AppRunner(pay_app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", settings.payment_webhook_port)
+            await site.start()
+            log.info("payment_webhook_started", port=settings.payment_webhook_port)
     dp.include_router(router)
 
     playwright_ok = HAS_PLAYWRIGHT

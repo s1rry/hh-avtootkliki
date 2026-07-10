@@ -81,8 +81,46 @@ class WorkerScheduler:
         if self.notify and not self._is_quiet_hours():
             await self.notify(text)
 
+    async def _job_all_users(self):
+        """Мультиюзер: прогнать автоотклик по каждому активному пользователю."""
+        from sqlalchemy import select
+        from app.database import async_session
+        from app.models.user import User
+        from app.workers.user_runner import run_user_cycle
+
+        async with async_session() as session:
+            user_ids = (await session.execute(
+                select(User.id).where(User.is_active.is_(True), User.hh_connected.is_(True))
+            )).scalars().all()
+        for uid in user_ids:
+            try:
+                await run_user_cycle(uid)
+            except Exception as e:
+                log.error("user_cycle_failed", user_id=uid, error=str(e))
+
+    def _start_multi(self, interval: int):
+        """Планировщик мультиюзерного режима: один общий цикл по пользователям."""
+        from datetime import datetime, timedelta
+        self.scheduler.add_job(
+            self._job_all_users,
+            "interval",
+            seconds=interval,
+            id="multi_apply",
+            name="Автоотклик (мультиюзер)",
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=60,
+            next_run_time=datetime.now(MSK) + timedelta(seconds=30),
+        )
+        self.scheduler.start()
+        log.info("scheduler_started_multi", interval=interval)
+
     def start(self):
         interval = settings.check_interval_sec
+
+        if settings.mode == "multi":
+            self._start_multi(interval)
+            return
 
         self.scheduler.add_job(
             self._job_search,

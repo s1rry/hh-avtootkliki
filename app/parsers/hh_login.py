@@ -152,9 +152,11 @@ class OTPLoginSession:
         await self.cancel()
         if not token:
             return {"error": "token_exchange_failed"}
+        # single-режим: сохраняем токен глобально (как раньше).
+        # multi-режим: вызывающий берёт token из результата и кладёт в User.
         _save_token(token)
         log.info("otp_login_success")
-        return {"status": "ok"}
+        return {"status": "ok", "token": token}
 
     async def _exchange(self, code: str) -> dict | None:
         try:
