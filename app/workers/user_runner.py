@@ -141,6 +141,20 @@ async def run_user_cycle(user_id: int) -> int:
                 await session.refresh(vac)
             vac_id = vac.id
 
+        # Умный отбор: ИИ оценивает соответствие вакансии резюме и отсекает слабые.
+        if getattr(st, "ai_score_enabled", False) and resume_text:
+            snip = item.get("snippet") or {}
+            desc = " ".join(x for x in (snip.get("responsibility"), snip.get("requirement")) if x)
+            score = await claude_ai.score_vacancy(title, desc, resume_text)
+            if score < st.ai_score_min:
+                log.info("user_vacancy_skipped_low_score", user_id=user_id, vid=vid, score=score)
+                async with async_session() as session:
+                    v = await session.get(Vacancy, vac_id)
+                    if v:
+                        v.status = VacancyStatus.REJECTED
+                        await session.commit()
+                continue
+
         letter = await _build_letter(item, title, st, resume_text)
         try:
             result, info = await client.apply(vid, letter)

@@ -101,6 +101,7 @@ def _summary(s: UserSettings) -> str:
         f"🚫 Исключения: <b>{s.excluded_text or '—'}</b>\n"
         f"✉️ Письма: <b>{LETTER_MODES.get(s.letter_mode, s.letter_mode)}</b>"
         f"{' + ИИ' if s.ai_enabled else ''}\n"
+        f"🎯 Умный отбор: <b>{('от ' + str(s.ai_score_min) + '%') if s.ai_score_enabled else 'выкл'}</b>\n"
         f"📊 Лимит/день: <b>{s.daily_limit}</b>\n"
         f"⏰ Окно: <b>{s.apply_hour_start}:00–{s.apply_hour_end}:00 МСК</b>"
     )
@@ -113,6 +114,8 @@ def _main_kb(is_active: bool, s: UserSettings) -> InlineKeyboardMarkup:
            callback_data="task:toggle_active")],
         [b(text=f"📈 Поднятие резюме: {'вкл' if s.resume_bump else 'выкл'}",
            callback_data="task:toggle_bump")],
+        [b(text=f"🎯 Умный отбор (ИИ): {('от ' + str(s.ai_score_min) + '%') if s.ai_score_enabled else 'выкл'}",
+           callback_data="task:score")],
         [b(text="🔑 Ключевые слова", callback_data="task:input:search_text"),
          b(text="📍 Регион", callback_data="task:input:areas")],
         [b(text="💻 Формат", callback_data="task:sub:fmt"),
@@ -387,6 +390,50 @@ async def cb_lmode(cb: CallbackQuery, **kw):
     await cb.answer(LETTER_MODES.get(mode, mode))
 
 
+def _score_kb(s: UserSettings) -> InlineKeyboardMarkup:
+    b = InlineKeyboardButton
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [b(text=f"🎯 Умный отбор: {'🟢 вкл' if s.ai_score_enabled else '⚪️ выкл'}",
+           callback_data="task:toggle_score")],
+        [b(text=f"🎚 Порог соответствия: от {s.ai_score_min}%",
+           callback_data="task:input:ai_score_min")],
+        [b(text="⬅️ Назад", callback_data="task:menu")],
+    ])
+
+
+async def _show_score(cb: CallbackQuery, s: UserSettings):
+    text = (
+        "🎯 <b>Умный отбор вакансий (ИИ)</b>\n\n"
+        "Перед откликом ИИ сравнивает вакансию с твоим резюме и ставит оценку "
+        "соответствия 0–100%. Бот откликается только на вакансии с оценкой "
+        f"<b>≥ {s.ai_score_min}%</b> — слабые совпадения пропускаются.\n\n"
+        "⚠️ Тратит чуть больше ИИ-запросов и времени, зато отклики точнее.\n"
+        "Порог выше = меньше откликов, но релевантнее."
+    )
+    await cb.message.edit_text(text, reply_markup=_score_kb(s), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "task:score")
+async def cb_score(cb: CallbackQuery, **kw):
+    async with async_session() as session:
+        user = await _load(session, cb)
+        s = user.get_settings()
+    await _show_score(cb, s)
+    await cb.answer()
+
+
+@router.callback_query(F.data == "task:toggle_score")
+async def cb_toggle_score(cb: CallbackQuery, **kw):
+    async with async_session() as session:
+        user = await _load(session, cb)
+        s = user.get_settings()
+        s.ai_score_enabled = not s.ai_score_enabled
+        user.set_settings(s)
+        await session.commit()
+    await cb.message.edit_reply_markup(reply_markup=_score_kb(s))
+    await cb.answer("Умный отбор включён" if s.ai_score_enabled else "Выключен")
+
+
 @router.callback_query(F.data == "task:toggle_bump")
 async def cb_toggle_bump(cb: CallbackQuery, **kw):
     async with async_session() as session:
@@ -464,6 +511,8 @@ _PROMPTS = {
     "salary_min": "Пришли минимальную зарплату числом (например: <code>200000</code>). 0 = без ограничения.",
     "excluded_text": "Пришли слова-исключения через запятую (например: <code>1С, junior</code>).",
     "daily_limit": "Пришли лимит откликов в день числом.",
+    "ai_score_min": "Пришли минимальный процент соответствия для отклика (0–100). "
+                    "Например <code>70</code> — откликаться только на вакансии с оценкой ИИ ≥ 70%.",
     "window": "Пришли окно откликов в формате <code>9-21</code> (часы МСК). Круглосуточно — пришли <code>0-24</code>.",
     "ai_custom_prompt": "Пришли свой промт для ИИ-писем (как писать сопроводительное). Пусто/<code>-</code> — вернуть стандартный.",
     "contact": "Пришли контакт для сопроводительных писем — его увидит HR вместо твоего личного ТГ "
@@ -509,6 +558,11 @@ async def on_value(message: Message, state: FSMContext, **kw):
                 s.salary_min = int(raw)
             else:
                 err = "Нужно число."
+        elif field == "ai_score_min":
+            if raw.isdigit():
+                s.ai_score_min = max(0, min(100, int(raw)))
+            else:
+                err = "Нужно число 0–100."
         elif field == "daily_limit":
             if raw.isdigit():
                 cap = _limit_cap(user)
