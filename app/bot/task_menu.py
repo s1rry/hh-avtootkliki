@@ -131,10 +131,11 @@ def _main_kb(is_active: bool, s: UserSettings) -> InlineKeyboardMarkup:
     ])
 
 
-async def _tasks_line(user_id: int) -> str:
+async def _tasks_line(tg_user) -> str:
     from app.services.search_tasks import list_tasks
     async with async_session() as session:
-        tasks = await list_tasks(session, user_id)
+        user = await get_or_create_user(session, tg_user.id, tg_user.username)
+        tasks = await list_tasks(session, user.id)
     if not tasks:
         return ""
     parts = [f"{t.keyword}{'' if t.is_active else ' (выкл)'}" for t in tasks]
@@ -142,8 +143,7 @@ async def _tasks_line(user_id: int) -> str:
 
 
 async def _show_main(target, s: UserSettings, is_active: bool, edit=False):
-    uid = target.from_user.id
-    tasks_line = await _tasks_line(uid)
+    tasks_line = await _tasks_line(target.from_user)
     text = "⚙️ <b>Задача автоотклика</b>\n\n" + _summary(s, tasks_line)
     kb = _main_kb(is_active, s)
     if edit and isinstance(target, CallbackQuery):
