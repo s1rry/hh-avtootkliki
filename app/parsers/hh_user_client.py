@@ -113,7 +113,11 @@ class HHUserClient:
             async with httpx.AsyncClient(timeout=20) as c:
                 r = await c.get(f"{API}/vacancies", headers=headers, params=q)
             if r.status_code == 200:
-                return (r.json() or {}).get("items") or []
+                data = r.json() or {}
+                items = data.get("items") or []
+                log.info("user_search_ok", text=str(q.get("text"))[:80],
+                         page=page, found=data.get("found"), items=len(items))
+                return items
             log.warning("user_search_failed", status=r.status_code, body=r.text[:200])
         except Exception as e:
             log.warning("user_search_error", error=str(e))
