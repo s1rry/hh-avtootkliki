@@ -1,5 +1,6 @@
 from app.models.base import Base
 from app.models.user import User
+from app.models.hh_account import HHAccount
 from app.models.payment import Payment
 from app.models.vacancy import Vacancy
 from app.models.company import Company
@@ -12,6 +13,7 @@ from app.models.blacklist import Blacklist
 __all__ = [
     "Base",
     "User",
+    "HHAccount",
     "Payment",
     "Vacancy",
     "Company",

@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     # Бета: первым N пользователям — полный доступ на subscription_days бесплатно.
     beta_full_access_slots: int = 50
 
+    # Максимум hh-аккаунтов у пользователя на расширенном тарифе (включая основной).
+    max_hh_accounts: int = 3
+
     # Database
     database_url: str = "sqlite+aiosqlite:///data/jobhunter.db"
     redis_url: str = ""

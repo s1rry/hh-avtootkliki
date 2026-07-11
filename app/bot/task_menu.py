@@ -248,12 +248,13 @@ async def btn_settings(message: Message, **kw):
         paid = user.is_paid
         resume_line = (user.resume_text.splitlines()[0] if user.resume_text else "")
         contact = (user.get_settings().contact or "").strip()
+        extra = await _extra_accounts_count(session, user.id)
     if not connected:
         await message.answer("🔗 hh.ru пока не подключён. Нажми /connect.")
         return
     text = (
         "⚙️ <b>Настройки</b>\n\n"
-        f"🔗 Аккаунтов hh подключено: <b>1</b>\n"
+        f"🔗 Аккаунтов hh: <b>{1 + extra}</b>\n"
         f"📄 {resume_line or 'резюме загружено'}\n"
         f"✉️ Контакт для писем: <b>{contact or 'личный ТГ (по умолчанию)'}</b>\n"
         f"💎 Тариф: <b>{'Расширенный' if paid else 'Бесплатный'}</b>"
@@ -262,20 +263,110 @@ async def btn_settings(message: Message, **kw):
         [InlineKeyboardButton(text="✉️ Контакт для писем", callback_data="task:input:contact")],
         [InlineKeyboardButton(text="📨 Пересылка сообщений (2-й ТГ)", callback_data="ub:menu")],
         [InlineKeyboardButton(text="🗑 Убрать отказы на hh", callback_data="acc:hide_rej")],
-        [InlineKeyboardButton(text="➕ Подключить ещё аккаунт", callback_data="acc:add")],
-        [InlineKeyboardButton(text="🚪 Выйти из аккаунта hh", callback_data="acc:logout")],
+        [InlineKeyboardButton(text="🔗 Мои аккаунты", callback_data="acc:list")],
+        [InlineKeyboardButton(text="🚪 Выйти из основного hh", callback_data="acc:logout")],
         [InlineKeyboardButton(text="💎 Тариф", callback_data="task:tariff")],
     ])
     await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
-@router.callback_query(F.data == "acc:add")
-async def cb_acc_add(cb: CallbackQuery, **kw):
-    await cb.answer()
-    await cb.message.answer(
-        "Несколько hh-аккаунтов одновременно — функция расширенного тарифа (скоро). "
-        "Сейчас можно переподключить текущий: /connect"
+async def _extra_accounts_count(session, user_id: int) -> int:
+    from app.models.hh_account import HHAccount
+    return (await session.execute(
+        select(func.count(HHAccount.id)).where(HHAccount.user_id == user_id)
+    )).scalar() or 0
+
+
+async def _accounts_view(cb: CallbackQuery):
+    from app.models.hh_account import HHAccount
+    b = InlineKeyboardButton
+    async with async_session() as session:
+        user = await _load(session, cb)
+        accs = (await session.execute(
+            select(HHAccount).where(HHAccount.user_id == user.id).order_by(HHAccount.id)
+        )).scalars().all()
+        primary_line = (user.resume_text.splitlines()[0] if user.resume_text else "основной")
+        total = 1 + len(accs)
+    rows = [[b(text=f"① {primary_line[:40]} (основной)", callback_data="noop")]]
+    for i, a in enumerate(accs, start=2):
+        mark = "🟢" if a.is_active else "⚪️"
+        rows.append([b(text=f"{mark} {(a.label or 'аккаунт')[:34]}", callback_data=f"acc:tgl:{a.id}"),
+                     b(text="🗑", callback_data=f"acc:del:{a.id}")])
+    rows.append([b(text="➕ Подключить ещё аккаунт", callback_data="acc:add")])
+    rows.append([b(text="⬅️ Назад", callback_data="task:menu")])
+    text = (
+        "🔗 <b>Мои hh-аккаунты</b>\n\n"
+        f"Всего: <b>{total}</b>. Автоотклик идёт с основного и со всех 🟢 активных "
+        "(у каждого свой дневной лимит).\n"
+        "Тапни по доп. аккаунту — вкл/выкл, 🗑 — удалить."
     )
+    await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "acc:list")
+async def cb_acc_list(cb: CallbackQuery, **kw):
+    await _accounts_view(cb)
+    await cb.answer()
+
+
+@router.callback_query(F.data == "noop")
+async def cb_noop(cb: CallbackQuery, **kw):
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("acc:tgl:"))
+async def cb_acc_toggle(cb: CallbackQuery, **kw):
+    from app.models.hh_account import HHAccount
+    aid = int(cb.data.split(":")[2])
+    async with async_session() as session:
+        user = await _load(session, cb)
+        a = await session.get(HHAccount, aid)
+        if a and a.user_id == user.id:
+            a.is_active = not a.is_active
+            await session.commit()
+    await _accounts_view(cb)
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("acc:del:"))
+async def cb_acc_del(cb: CallbackQuery, **kw):
+    from app.models.hh_account import HHAccount
+    aid = int(cb.data.split(":")[2])
+    async with async_session() as session:
+        user = await _load(session, cb)
+        a = await session.get(HHAccount, aid)
+        if a and a.user_id == user.id:
+            await session.delete(a)
+            await session.commit()
+    await _accounts_view(cb)
+    await cb.answer("Аккаунт удалён")
+
+
+@router.callback_query(F.data == "acc:add")
+async def cb_acc_add(cb: CallbackQuery, state: FSMContext, **kw):
+    from app.bot.hh_connect import ConnectSG
+    async with async_session() as session:
+        user = await _load(session, cb)
+        paid = user.is_paid
+        total = 1 + await _extra_accounts_count(session, user.id)
+    if not paid:
+        await cb.answer()
+        await cb.message.answer(
+            "Несколько hh-аккаунтов — функция расширенного тарифа 💎\n"
+            "Оформить: ⚙️ Настройки → 💎 Тариф."
+        )
+        return
+    if total >= settings.max_hh_accounts:
+        await cb.answer(f"Лимит аккаунтов: {settings.max_hh_accounts}", show_alert=True)
+        return
+    await state.set_state(ConnectSG.phone)
+    await cb.message.answer(
+        "🔐 <b>Добавление ещё одного hh-аккаунта</b>\n\n"
+        "Пришли номер телефона этого аккаунта — hh отправит код, введёшь его здесь. "
+        "Пароль не нужен.\n\nОтмена: /cancel",
+        parse_mode="HTML",
+    )
+    await cb.answer()
 
 
 @router.callback_query(F.data == "acc:hide_rej")

@@ -29,18 +29,23 @@ async def init_db():
         # Лёгкая авто-миграция для существующей SQLite-БД: досоздаём новые
         # колонки users (create_all не делает ALTER для уже созданных таблиц).
         if settings.database_url.startswith("sqlite"):
-            from sqlalchemy import text
-            cols = {r[1] for r in (await conn.exec_driver_sql("PRAGMA table_info(users)")).fetchall()}
-            add = {
-                "tg_api_id": "BIGINT",
-                "tg_api_hash": "TEXT",
-                "tg_session": "TEXT",
-                "tg_userbot_active": "BOOLEAN DEFAULT 0",
+            migrations = {
+                "users": {
+                    "tg_api_id": "BIGINT",
+                    "tg_api_hash": "TEXT",
+                    "tg_session": "TEXT",
+                    "tg_userbot_active": "BOOLEAN DEFAULT 0",
+                },
+                "vacancies": {"account_ref": "VARCHAR(32)"},
+                "applications": {"account_ref": "VARCHAR(32)"},
             }
-            for name, ddl in add.items():
-                if name not in cols:
-                    await conn.exec_driver_sql(f"ALTER TABLE users ADD COLUMN {name} {ddl}")
-                    log.info("db_migrate_add_column", column=name)
+            for table, add in migrations.items():
+                cols = {r[1] for r in (await conn.exec_driver_sql(
+                    f"PRAGMA table_info({table})")).fetchall()}
+                for name, ddl in add.items():
+                    if name not in cols:
+                        await conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+                        log.info("db_migrate_add_column", table=table, column=name)
     # Ограничить доступ к файлу БД (в нём токены/сессии) — только владелец.
     if settings.database_url.startswith("sqlite"):
         import os

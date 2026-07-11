@@ -111,26 +111,50 @@ async def connect_code(message: Message, state: FSMContext, **kw):
     # Подтягиваем резюме
     resume_id, resume_text, resume_title = await fetch_resume(token["access_token"])
 
+    is_extra = False
     async with async_session() as session:
         user = await get_or_create_user(
             session, message.chat.id, message.from_user.username if message.from_user else None
         )
-        user.hh_access_token = token["access_token"]
-        user.hh_refresh_token = token.get("refresh_token", "")
-        user.hh_token_expires = expires
-        user.hh_connected = True
-        if resume_id:
-            user.hh_resume_id = resume_id
-        if resume_text:
-            user.resume_text = resume_text
-        # Ключевые слова по умолчанию — из заголовка резюме (чтобы не откликаться на всё подряд)
-        st = user.get_settings()
-        if not (st.search_text or "").strip() and resume_title:
-            st.search_text = resume_title
-            user.set_settings(st)
-        await session.commit()
+        if user.hh_connected and user.hh_access_token:
+            # Основной уже есть → это дополнительный аккаунт (мультиаккаунт).
+            from app.models.hh_account import HHAccount
+            acc = HHAccount(
+                user_id=user.id,
+                label=(resume_title or (message.from_user.username if message.from_user else None) or "Доп. аккаунт"),
+                hh_access_token=token["access_token"],
+                hh_refresh_token=token.get("refresh_token", ""),
+                hh_token_expires=expires,
+                hh_resume_id=resume_id or None,
+                resume_text=resume_text or None,
+                is_active=True,
+            )
+            session.add(acc)
+            await session.commit()
+            is_extra = True
+        else:
+            user.hh_access_token = token["access_token"]
+            user.hh_refresh_token = token.get("refresh_token", "")
+            user.hh_token_expires = expires
+            user.hh_connected = True
+            if resume_id:
+                user.hh_resume_id = resume_id
+            if resume_text:
+                user.resume_text = resume_text
+            # Ключевые слова по умолчанию — из заголовка резюме (чтобы не откликаться на всё подряд)
+            st = user.get_settings()
+            if not (st.search_text or "").strip() and resume_title:
+                st.search_text = resume_title
+                user.set_settings(st)
+            await session.commit()
 
-    if resume_id:
+    if is_extra:
+        await message.answer(
+            f"✅ Добавлен ещё один hh-аккаунт{(' — ' + resume_title) if resume_title else ''}.\n"
+            "Автоотклик будет идти и с него (свои лимит и дедуп). "
+            "Список: ⚙️ Настройки → 🔗 Мои аккаунты."
+        )
+    elif resume_id:
         from app.bot.media import send_photo_or_text
         await send_photo_or_text(
             message, "apply",

@@ -52,6 +52,9 @@ class Vacancy(Base, TimestampMixin):
     )
     ai_score: Mapped[float | None] = mapped_column(Float)
     ai_reason: Mapped[str | None] = mapped_column(Text)
+    # Какой hh-аккаунт откликнулся: "u<user_id>" (основной) или "a<hh_account_id>".
+    # None — старые записи (основной аккаунт до мультиаккаунта).
+    account_ref: Mapped[str | None] = mapped_column(String(32), index=True)
 
     applications: Mapped[list["Application"]] = relationship(back_populates="vacancy")  # noqa: F821
     messages: Mapped[list["RecruiterMessage"]] = relationship(back_populates="vacancy")  # noqa: F821

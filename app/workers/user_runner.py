@@ -67,53 +67,110 @@ def _within_window(start: int, end: int) -> bool:
     return start <= hour < end
 
 
-async def _sent_today(session, user_id: int) -> int:
+async def _sent_today(session, user_id: int, account_ref: str) -> int:
     return (await session.execute(
         select(func.count(Application.id)).where(
             Application.user_id == user_id,
+            Application.account_ref == account_ref,
             Application.status == ApplicationStatus.SENT,
             func.date(Application.created_at) == func.current_date(),
         )
     )).scalar() or 0
 
 
+async def _account_contexts(session, user) -> list[dict]:
+    """Список аккаунтов для прогона: основной (User.hh_*) + активные доп."""
+    from app.models.hh_account import HHAccount
+    ctxs: list[dict] = []
+    if user.hh_connected and user.hh_access_token:
+        ctxs.append({
+            "ref": f"u{user.id}", "kind": "primary", "id": None,
+            "access_token": user.hh_access_token,
+            "refresh_token": user.hh_refresh_token or "",
+            "resume_id": user.hh_resume_id,
+            "expires_at": user.hh_token_expires.timestamp() if user.hh_token_expires else 0.0,
+            "resume_text": user.resume_text or "",
+        })
+    accs = (await session.execute(
+        select(HHAccount).where(HHAccount.user_id == user.id, HHAccount.is_active.is_(True))
+    )).scalars().all()
+    for a in accs:
+        if not a.hh_access_token:
+            continue
+        ctxs.append({
+            "ref": f"a{a.id}", "kind": "extra", "id": a.id,
+            "access_token": a.hh_access_token, "refresh_token": a.hh_refresh_token or "",
+            "resume_id": a.hh_resume_id,
+            "expires_at": a.hh_token_expires.timestamp() if a.hh_token_expires else 0.0,
+            "resume_text": a.resume_text or "",
+        })
+    return ctxs
+
+
+async def _save_refreshed_token(ctx: dict, new_token: dict) -> None:
+    from datetime import timezone
+    from app.models.hh_account import HHAccount
+    expires = datetime.fromtimestamp(new_token["expires_at"], tz=timezone.utc)
+    async with async_session() as session:
+        if ctx["kind"] == "primary":
+            u = await session.get(User, ctx["user_id"])
+            if u:
+                u.hh_access_token = new_token["access_token"]
+                u.hh_refresh_token = new_token["refresh_token"]
+                u.hh_token_expires = expires
+                await session.commit()
+        else:
+            a = await session.get(HHAccount, ctx["id"])
+            if a:
+                a.hh_access_token = new_token["access_token"]
+                a.hh_refresh_token = new_token["refresh_token"]
+                a.hh_token_expires = expires
+                await session.commit()
+
+
 async def run_user_cycle(user_id: int) -> int:
-    """Один цикл автоотклика пользователя. Возвращает число новых откликов."""
-    applied = 0
+    """Цикл автоотклика пользователя по всем его аккаунтам. Число новых откликов."""
     async with async_session() as session:
         user = await session.get(User, user_id)
-        if not user or not user.is_active or not user.hh_connected or not user.hh_access_token:
+        if not user or not user.is_active:
             return 0
         st = user.get_settings()
-        resume_text = user.resume_text or ""
         # Без ключевых слов hh вернёт всё подряд — не откликаемся во избежание спама.
         if not (st.search_text or "").strip():
             log.info("user_no_keywords_skip", user_id=user.id)
             return 0
         if not _within_window(st.apply_hour_start, st.apply_hour_end):
             return 0
-        remaining = st.daily_limit - await _sent_today(session, user.id)
-        if remaining <= 0:
-            return 0
+        contexts = await _account_contexts(session, user)
 
-        client = HHUserClient(
-            access_token=user.hh_access_token,
-            refresh_token=user.hh_refresh_token or "",
-            resume_id=user.hh_resume_id,
-            expires_at=user.hh_token_expires.timestamp() if user.hh_token_expires else 0.0,
-        )
-        items = await client.search(st.to_hh_params(), per_page=min(remaining + 10, 100))
+    total = 0
+    for ctx in contexts:
+        ctx["user_id"] = user_id
+        try:
+            total += await run_account_cycle(user_id, st, ctx)
+        except Exception as e:
+            log.error("account_cycle_error", user_id=user_id, ref=ctx["ref"], error=str(e))
+    log.info("user_cycle_done", user_id=user_id, applied=total, accounts=len(contexts))
+    return total
 
-    # Сохраняем обновлённый токен, если рефрешнулся
+
+async def run_account_cycle(user_id: int, st, ctx: dict) -> int:
+    """Один цикл автоотклика для одного hh-аккаунта (свой дедуп и лимит)."""
+    ref = ctx["ref"]
+    resume_text = ctx["resume_text"]
+    applied = 0
+    async with async_session() as session:
+        remaining = st.daily_limit - await _sent_today(session, user_id, ref)
+    if remaining <= 0:
+        return 0
+
+    client = HHUserClient(
+        access_token=ctx["access_token"], refresh_token=ctx["refresh_token"],
+        resume_id=ctx["resume_id"], expires_at=ctx["expires_at"],
+    )
+    items = await client.search(st.to_hh_params(), per_page=min(remaining + 10, 100))
     if client.new_token:
-        async with async_session() as session:
-            u = await session.get(User, user_id)
-            if u:
-                u.hh_access_token = client.new_token["access_token"]
-                u.hh_refresh_token = client.new_token["refresh_token"]
-                from datetime import timezone
-                u.hh_token_expires = datetime.fromtimestamp(client.new_token["expires_at"], tz=timezone.utc)
-                await session.commit()
+        await _save_refreshed_token(ctx, client.new_token)
 
     scored = 0
     for item in items:
@@ -126,19 +183,18 @@ async def run_user_cycle(user_id: int) -> int:
         url = (item.get("alternate_url") or f"https://hh.ru/vacancy/{vid}")
 
         async with async_session() as session:
-            # Дедуп: уже откликались этой вакансией?
+            # Дедуп в рамках этого аккаунта.
             vac = (await session.execute(
                 select(Vacancy).where(
-                    Vacancy.user_id == user_id,
-                    Vacancy.platform == "hh",
-                    Vacancy.external_id == vid,
+                    Vacancy.user_id == user_id, Vacancy.platform == "hh",
+                    Vacancy.external_id == vid, Vacancy.account_ref == ref,
                 )
             )).scalar_one_or_none()
             if vac and vac.status == VacancyStatus.APPLIED:
                 continue
             if vac is None:
                 vac = Vacancy(
-                    user_id=user_id, platform="hh", external_id=vid,
+                    user_id=user_id, platform="hh", external_id=vid, account_ref=ref,
                     url=url, title=title, status=VacancyStatus.NEW,
                 )
                 session.add(vac)
@@ -149,14 +205,13 @@ async def run_user_cycle(user_id: int) -> int:
         # Умный отбор: ИИ оценивает соответствие вакансии резюме и отсекает слабые.
         if getattr(st, "ai_score_enabled", False) and resume_text:
             if scored >= MAX_SCORINGS_PER_CYCLE:
-                log.info("user_score_budget_reached", user_id=user_id, scored=scored)
+                log.info("user_score_budget_reached", user_id=user_id, ref=ref, scored=scored)
                 break
             snip = item.get("snippet") or {}
             desc = " ".join(x for x in (snip.get("responsibility"), snip.get("requirement")) if x)
             scored += 1
             score = await claude_ai.score_vacancy(title, desc, resume_text)
             if score is None:
-                # ИИ недоступен — при включённом строгом отборе не откликаемся вслепую.
                 log.warning("user_score_unavailable_skip", user_id=user_id, vid=vid)
                 continue
             async with async_session() as session:
@@ -179,7 +234,7 @@ async def run_user_cycle(user_id: int) -> int:
             continue
 
         if info.get("error") == "daily_limit":
-            log.info("user_daily_limit_hit", user_id=user_id)
+            log.info("user_daily_limit_hit", user_id=user_id, ref=ref)
             break
 
         success = result is True
@@ -189,7 +244,7 @@ async def run_user_cycle(user_id: int) -> int:
             if not already:
                 session.add(Application(
                     user_id=user_id, vacancy_id=vac_id, platform="hh",
-                    cover_letter=letter,
+                    cover_letter=letter, account_ref=ref,
                     status=ApplicationStatus.SENT if success else ApplicationStatus.FAILED,
                     attempt_count=1,
                 ))
@@ -202,5 +257,4 @@ async def run_user_cycle(user_id: int) -> int:
             applied += 1
         await random_delay(st.apply_delay_min, st.apply_delay_max)
 
-    log.info("user_cycle_done", user_id=user_id, applied=applied)
     return applied
