@@ -612,7 +612,7 @@ def _letters_kb(s: UserSettings) -> InlineKeyboardMarkup:
         [mode_btn("always")],
         [mode_btn("required")],
         [mode_btn("off")],
-        [b(text=f"🤖 ИИ-персонализация: {'вкл' if s.ai_enabled else 'выкл'}", callback_data="task:toggle_ai")],
+        [b(text=f"🤖 ИИ пишет письма: {'вкл' if s.ai_enabled else 'выкл'}", callback_data="task:toggle_ai")],
         [b(text=("✍️ Своё письмо: задано" if s.custom_letter else "✍️ Своё письмо: нет"),
            callback_data="task:input:custom_letter")],
         [b(text=("📝 Промт для ИИ: задан" if s.ai_custom_prompt else "📝 Промт для ИИ: стандартный"),
@@ -625,9 +625,10 @@ async def _show_letters(cb: CallbackQuery, s: UserSettings):
     text = (
         "✉️ <b>Сопроводительные письма</b>\n\n"
         "• <b>Режим</b> — прикладывать письмо всегда, только где вакансия требует, или без писем.\n"
-        "• <b>ИИ-персонализация</b> — ИИ пишет письмо под каждую вакансию по твоему резюме.\n"
+        "• <b>🤖 ИИ пишет письма</b> — главный выключатель. Вкл → ИИ генерит письмо под "
+        "каждую вакансию по резюме. Выкл → шлётся своё письмо или шаблон.\n"
         "• <b>✍️ Своё письмо</b> — твой готовый текст, шлётся как есть (когда ИИ выключен).\n"
-        "• <b>📝 Промт для ИИ</b> — инструкция, как ИИ должен писать (работает при включённом ИИ).\n\n"
+        "• <b>📝 Промт для ИИ</b> — как именно ИИ должен писать (работает только при включённом ИИ).\n\n"
         f"Сейчас: <b>{'ИИ-письма' if s.ai_enabled else ('своё письмо' if s.custom_letter else 'стандартный шаблон')}</b>."
     )
     await cb.message.edit_text(text, reply_markup=_letters_kb(s), parse_mode="HTML")
