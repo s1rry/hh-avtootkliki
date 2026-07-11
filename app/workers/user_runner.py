@@ -171,108 +171,115 @@ async def run_account_cycle(user_id: int, st, ctx: dict) -> int:
         access_token=ctx["access_token"], refresh_token=ctx["refresh_token"],
         resume_id=ctx["resume_id"], expires_at=ctx["expires_at"],
     )
-    params = st.to_hh_params()
+    base_params = st.to_hh_params()
+    phrases = st.search_phrases() or [""]
     scored = 0
     seen = 0
-    # Пагинация: топ-страница быстро исчерпывается (всё уже отработано), поэтому
-    # идём вглубь выдачи, пока не наберём дневной лимит или не кончатся вакансии.
-    for page in range(MAX_SEARCH_PAGES):
-        if applied >= remaining:
+    stop = False
+    # Ищем по каждой ключевой фразе отдельным запросом (hh не понимает OR),
+    # с пагинацией вглубь — топ быстро исчерпывается уже отработанным.
+    for phrase in phrases:
+        if stop or applied >= remaining:
             break
-        items = await client.search(params, per_page=50, page=page)
-        if client.new_token:
-            await _save_refreshed_token(ctx, client.new_token)
-        if not items:
-            break
-        stop = False
-        for item in items:
+        for page in range(MAX_SEARCH_PAGES):
             if applied >= remaining:
                 break
-            seen += 1
-            vid = str(item.get("id") or "")
-            if not vid:
-                continue
-            title = item.get("name") or ""
-            url = (item.get("alternate_url") or f"https://hh.ru/vacancy/{vid}")
-
-            async with async_session() as session:
-                # Дедуп в рамках этого аккаунта.
-                vac = (await session.execute(
-                    select(Vacancy).where(
-                        Vacancy.user_id == user_id, Vacancy.platform == "hh",
-                        Vacancy.external_id == vid, Vacancy.account_ref == ref,
-                    )
-                )).scalar_one_or_none()
-                if vac and vac.status in (VacancyStatus.APPLIED, VacancyStatus.REJECTED):
+            params = dict(base_params)
+            if phrase:
+                params["text"] = phrase
+            items = await client.search(params, per_page=50, page=page)
+            if client.new_token:
+                await _save_refreshed_token(ctx, client.new_token)
+            if not items:
+                break
+            for item in items:
+                if applied >= remaining:
+                    break
+                seen += 1
+                vid = str(item.get("id") or "")
+                if not vid:
                     continue
-                if vac is None:
-                    vac = Vacancy(
-                        user_id=user_id, platform="hh", external_id=vid, account_ref=ref,
-                        url=url, title=title, status=VacancyStatus.NEW,
-                    )
-                    session.add(vac)
-                    await session.commit()
-                    await session.refresh(vac)
-                vac_id = vac.id
+                title = item.get("name") or ""
+                url = (item.get("alternate_url") or f"https://hh.ru/vacancy/{vid}")
 
-            # Умный отбор: ИИ оценивает соответствие вакансии резюме и отсекает слабые.
-            if getattr(st, "ai_score_enabled", False) and resume_text:
-                if scored >= MAX_SCORINGS_PER_CYCLE:
-                    log.info("user_score_budget_reached", user_id=user_id, ref=ref, scored=scored)
+                async with async_session() as session:
+                    # Дедуп в рамках этого аккаунта.
+                    vac = (await session.execute(
+                        select(Vacancy).where(
+                            Vacancy.user_id == user_id, Vacancy.platform == "hh",
+                            Vacancy.external_id == vid, Vacancy.account_ref == ref,
+                        )
+                    )).scalar_one_or_none()
+                    if vac and vac.status in (VacancyStatus.APPLIED, VacancyStatus.REJECTED):
+                        continue
+                    if vac is None:
+                        vac = Vacancy(
+                            user_id=user_id, platform="hh", external_id=vid, account_ref=ref,
+                            url=url, title=title, status=VacancyStatus.NEW,
+                        )
+                        session.add(vac)
+                        await session.commit()
+                        await session.refresh(vac)
+                    vac_id = vac.id
+
+                # Умный отбор: ИИ оценивает соответствие вакансии резюме и отсекает слабые.
+                if getattr(st, "ai_score_enabled", False) and resume_text:
+                    if scored >= MAX_SCORINGS_PER_CYCLE:
+                        log.info("user_score_budget_reached", user_id=user_id, ref=ref, scored=scored)
+                        stop = True
+                        break
+                    snip = item.get("snippet") or {}
+                    desc = " ".join(x for x in (snip.get("responsibility"), snip.get("requirement")) if x)
+                    scored += 1
+                    score = await claude_ai.score_vacancy(title, desc, resume_text)
+                    if score is None:
+                        log.warning("user_score_unavailable_skip", user_id=user_id, vid=vid)
+                        continue
+                    async with async_session() as session:
+                        v = await session.get(Vacancy, vac_id)
+                        if v:
+                            v.ai_score = float(score)
+                            if score < st.ai_score_min:
+                                v.status = VacancyStatus.REJECTED
+                                v.ai_reason = f"Умный отбор: {score}% < порога {st.ai_score_min}%"
+                            await session.commit()
+                    if score < st.ai_score_min:
+                        log.info("user_vacancy_skipped_low_score", user_id=user_id, vid=vid, score=score)
+                        continue
+
+                letter = await _build_letter(item, title, st, resume_text)
+                try:
+                    result, info = await client.apply(vid, letter)
+                except Exception as e:
+                    log.error("user_apply_error", user_id=user_id, vid=vid, error=str(e))
+                    continue
+
+                if info.get("error") == "daily_limit":
+                    log.info("user_daily_limit_hit", user_id=user_id, ref=ref)
                     stop = True
                     break
-                snip = item.get("snippet") or {}
-                desc = " ".join(x for x in (snip.get("responsibility"), snip.get("requirement")) if x)
-                scored += 1
-                score = await claude_ai.score_vacancy(title, desc, resume_text)
-                if score is None:
-                    log.warning("user_score_unavailable_skip", user_id=user_id, vid=vid)
-                    continue
+
+                success = result is True
+                already = result == "already"
+
                 async with async_session() as session:
+                    if not already:
+                        session.add(Application(
+                            user_id=user_id, vacancy_id=vac_id, platform="hh",
+                            cover_letter=letter, account_ref=ref,
+                            status=ApplicationStatus.SENT if success else ApplicationStatus.FAILED,
+                            attempt_count=1,
+                        ))
                     v = await session.get(Vacancy, vac_id)
-                    if v:
-                        v.ai_score = float(score)
-                        if score < st.ai_score_min:
-                            v.status = VacancyStatus.REJECTED
-                            v.ai_reason = f"Умный отбор: {score}% < порога {st.ai_score_min}%"
-                        await session.commit()
-                if score < st.ai_score_min:
-                    log.info("user_vacancy_skipped_low_score", user_id=user_id, vid=vid, score=score)
-                    continue
+                    if v and (success or already):
+                        v.status = VacancyStatus.APPLIED
+                    await session.commit()
 
-            letter = await _build_letter(item, title, st, resume_text)
-            try:
-                result, info = await client.apply(vid, letter)
-            except Exception as e:
-                log.error("user_apply_error", user_id=user_id, vid=vid, error=str(e))
-                continue
-
-            if info.get("error") == "daily_limit":
-                log.info("user_daily_limit_hit", user_id=user_id, ref=ref)
-                stop = True
+                if success:
+                    applied += 1
+                await random_delay(st.apply_delay_min, st.apply_delay_max)
+            if stop:
                 break
-
-            success = result is True
-            already = result == "already"
-
-            async with async_session() as session:
-                if not already:
-                    session.add(Application(
-                        user_id=user_id, vacancy_id=vac_id, platform="hh",
-                        cover_letter=letter, account_ref=ref,
-                        status=ApplicationStatus.SENT if success else ApplicationStatus.FAILED,
-                        attempt_count=1,
-                    ))
-                v = await session.get(Vacancy, vac_id)
-                if v and (success or already):
-                    v.status = VacancyStatus.APPLIED
-                await session.commit()
-
-            if success:
-                applied += 1
-            await random_delay(st.apply_delay_min, st.apply_delay_max)
-        if stop:
-            break
 
     log.info("account_cycle_done", user_id=user_id, ref=ref, applied=applied, seen=seen)
     return applied

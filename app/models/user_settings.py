@@ -84,26 +84,21 @@ class UserSettings(BaseModel):
     apply_delay_min: int = 3
     apply_delay_max: int = 12
 
-    def _build_query(self) -> str:
-        """Собрать корректный текстовый запрос hh из ключевых слов.
+    def search_phrases(self) -> list[str]:
+        """Ключевые фразы для поиска (через запятую/слэш/перенос строки).
 
-        Несколько фраз пользователь пишет через запятую/слэш/перенос строки —
-        соединяем их оператором OR (широкий охват). Кавычки НЕ ставим: точная
-        фраза слишком сужает выдачу (подходящих вакансий может оказаться меньше,
-        чем уже отработано). Точность обеспечивает умный ИИ-отбор.
+        hh не понимает булев OR в тексте (возвращает 0), поэтому ищем по каждой
+        фразе отдельным запросом и объединяем — как при одиночной фразе, что
+        заведомо работает.
         """
         raw = (self.search_text or "").strip()
         if not raw:
-            return ""
-        parts = [p.strip() for p in re.split(r"[,/\n]+", raw) if p.strip()]
-        return " OR ".join(parts) if len(parts) > 1 else parts[0]
+            return []
+        return [p.strip() for p in re.split(r"[,/\n]+", raw) if p.strip()]
 
     def to_hh_params(self) -> dict:
-        """Собрать параметры для поиска вакансий hh /vacancies."""
+        """Параметры поиска hh /vacancies БЕЗ text — фразу подставляет движок."""
         params: dict = {}
-        query = self._build_query()
-        if query:
-            params["text"] = query
         if self.search_fields:
             params["search_field"] = self.search_fields
         if self.areas:
