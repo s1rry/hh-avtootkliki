@@ -241,20 +241,23 @@ async def run_account_cycle(user_id: int, st, ctx: dict, phrases: list[str]) -> 
                     desc = " ".join(x for x in (snip.get("responsibility"), snip.get("requirement")) if x)
                     scored += 1
                     score = await claude_ai.score_vacancy(title, desc, resume_text)
-                    if score is None:
-                        log.warning("user_score_unavailable_skip", user_id=user_id, vid=vid)
-                        continue
-                    async with async_session() as session:
-                        v = await session.get(Vacancy, vac_id)
-                        if v:
-                            v.ai_score = float(score)
-                            if score < st.ai_score_min:
-                                v.status = VacancyStatus.REJECTED
-                                v.ai_reason = f"Умный отбор: {score}% < порога {st.ai_score_min}%"
-                            await session.commit()
-                    if score < st.ai_score_min:
-                        log.info("user_vacancy_skipped_low_score", user_id=user_id, vid=vid, score=score)
-                        continue
+                    # Fail-open: если ИИ не смог оценить (None) — НЕ блокируем отклик,
+                    # иначе сбой/формат ответа ИИ останавливает всё. Режем только при
+                    # реальной оценке ниже порога.
+                    if score is not None:
+                        async with async_session() as session:
+                            v = await session.get(Vacancy, vac_id)
+                            if v:
+                                v.ai_score = float(score)
+                                if score < st.ai_score_min:
+                                    v.status = VacancyStatus.REJECTED
+                                    v.ai_reason = f"Умный отбор: {score}% < порога {st.ai_score_min}%"
+                                await session.commit()
+                        if score < st.ai_score_min:
+                            log.info("user_vacancy_skipped_low_score", user_id=user_id, vid=vid, score=score)
+                            continue
+                    else:
+                        log.warning("user_score_none_apply_anyway", user_id=user_id, vid=vid)
 
                 letter = await _build_letter(item, title, st, resume_text)
                 try:
