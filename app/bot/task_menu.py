@@ -613,7 +613,9 @@ def _letters_kb(s: UserSettings) -> InlineKeyboardMarkup:
         [mode_btn("required")],
         [mode_btn("off")],
         [b(text=f"🤖 ИИ-персонализация: {'вкл' if s.ai_enabled else 'выкл'}", callback_data="task:toggle_ai")],
-        [b(text=("📝 Свой промт: задан" if s.ai_custom_prompt else "📝 Свой промт: стандартный"),
+        [b(text=("✍️ Своё письмо: задано" if s.custom_letter else "✍️ Своё письмо: нет"),
+           callback_data="task:input:custom_letter")],
+        [b(text=("📝 Промт для ИИ: задан" if s.ai_custom_prompt else "📝 Промт для ИИ: стандартный"),
            callback_data="task:input:ai_custom_prompt")],
         [b(text="⬅️ Назад", callback_data="task:menu")],
     ])
@@ -622,9 +624,11 @@ def _letters_kb(s: UserSettings) -> InlineKeyboardMarkup:
 async def _show_letters(cb: CallbackQuery, s: UserSettings):
     text = (
         "✉️ <b>Сопроводительные письма</b>\n\n"
-        "• <b>Режим</b> — прикладывать письмо всегда, только где вакансия требует, или совсем без писем.\n"
-        "• <b>ИИ-персонализация</b> — письмо под каждую вакансию по твоему резюме (иначе шаблон).\n"
-        "• <b>Свой промт</b> — задать, как ИИ должен писать письма."
+        "• <b>Режим</b> — прикладывать письмо всегда, только где вакансия требует, или без писем.\n"
+        "• <b>ИИ-персонализация</b> — ИИ пишет письмо под каждую вакансию по твоему резюме.\n"
+        "• <b>✍️ Своё письмо</b> — твой готовый текст, шлётся как есть (когда ИИ выключен).\n"
+        "• <b>📝 Промт для ИИ</b> — инструкция, как ИИ должен писать (работает при включённом ИИ).\n\n"
+        f"Сейчас: <b>{'ИИ-письма' if s.ai_enabled else ('своё письмо' if s.custom_letter else 'стандартный шаблон')}</b>."
     )
     await cb.message.edit_text(text, reply_markup=_letters_kb(s), parse_mode="HTML")
 
@@ -776,6 +780,9 @@ _PROMPTS = {
                     "Например <code>70</code> — откликаться только на вакансии с оценкой ИИ ≥ 70%.",
     "window": "Пришли окно откликов в формате <code>9-21</code> (часы МСК). Круглосуточно — пришли <code>0-24</code>.",
     "ai_custom_prompt": "Пришли свой промт для ИИ-писем (как писать сопроводительное). Пусто/<code>-</code> — вернуть стандартный.",
+    "custom_letter": "Пришли текст своего сопроводительного письма — его будем прикладывать как есть "
+                     "(без ИИ). Можно вставить <code>%(vacancy_suffix)s</code> — подставится название вакансии. "
+                     "Пусто/<code>-</code> — убрать своё письмо.",
     "contact": "Пришли контакт для сопроводительных писем — его увидит HR вместо твоего личного ТГ "
                "(например второй ТГ-аккаунт <code>@my_work_tg</code>, почта или телефон). "
                "Пусто/<code>-</code> — убрать контакт.",
@@ -804,6 +811,8 @@ async def on_value(message: Message, state: FSMContext, **kw):
             s.search_text = raw
         elif field == "ai_custom_prompt":
             s.ai_custom_prompt = "" if raw in ("", "-") else raw
+        elif field == "custom_letter":
+            s.custom_letter = "" if raw in ("", "-") else raw
         elif field == "contact":
             s.contact = "" if raw in ("", "-") else raw
         elif field == "excluded_text":

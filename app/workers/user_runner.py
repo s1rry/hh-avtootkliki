@@ -62,7 +62,12 @@ async def _build_letter(item: dict, title: str, st, resume_text: str) -> str:
                 return text
         except Exception as e:
             log.warning("ai_letter_failed", error=str(e))
-    return render_letter(title, contact=(contact or None))
+    # Без ИИ: своё готовое письмо пользователя, иначе нейтральный шаблон.
+    custom = (getattr(st, "custom_letter", "") or "").strip()
+    text = render_letter(title, template=(custom or None), contact=(contact or None))
+    if custom and contact and contact not in text:
+        text += f"\n\nКонтакты: {contact}"
+    return text
 
 
 def _within_window(start: int, end: int) -> bool:
