@@ -46,6 +46,14 @@ async def init_db():
                     if name not in cols:
                         await conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
                         log.info("db_migrate_add_column", table=table, column=name)
+            # Привязать историю к основному аккаунту: старые записи с NULL
+            # account_ref принадлежат основному аккаунту "u<user_id>". Иначе
+            # дедуп не узнаёт уже отработанные вакансии и крутит их вхолостую.
+            for table in ("vacancies", "applications"):
+                await conn.exec_driver_sql(
+                    f"UPDATE {table} SET account_ref = 'u' || user_id "
+                    f"WHERE account_ref IS NULL AND user_id IS NOT NULL"
+                )
     # Ограничить доступ к файлу БД (в нём токены/сессии) — только владелец.
     if settings.database_url.startswith("sqlite"):
         import os
