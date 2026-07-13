@@ -42,6 +42,7 @@ SEL_LOGIN = 'input[data-qa="login-input-username"]'
 SEL_CODE_CONTAINER = 'div[data-qa="account-login-code-input"]'
 SEL_PIN = 'input[data-qa="magritte-pincode-input-field"]'
 SEL_CAPTCHA = 'img[data-qa="account-captcha-picture"]'
+SEL_CAPTCHA_INPUT = 'input[data-qa="account-captcha-input"]'
 
 
 class OTPLoginSession:
@@ -123,6 +124,35 @@ class OTPLoginSession:
             return {"error": f"no_code_field: {e}"}
 
         return {"status": "code_sent"}
+
+    async def submit_captcha(self, text: str) -> dict:
+        """Ввести разгаданную человеком капчу и продолжить к полю кода.
+
+        return {"status": "code_sent"} | {"status": "captcha"} (не та) | {"error": ...}
+        """
+        if not self.page:
+            return {"error": "no_session"}
+        try:
+            await self.page.fill(SEL_CAPTCHA_INPUT, text.strip())
+            await self.page.press(SEL_CAPTCHA_INPUT, "Enter")
+        except Exception as e:
+            return {"error": f"captcha_fill: {e}"}
+        # Капча снова видна → введена неверно, отдаём новую картинку.
+        try:
+            cap = await self.page.wait_for_selector(SEL_CAPTCHA, timeout=3000, state="visible")
+            if cap:
+                CAPTCHA_FILE.write_bytes(await cap.screenshot())
+                return {"status": "captcha"}
+        except Exception:
+            pass
+        # Иначе ждём поле кода.
+        try:
+            await self.page.wait_for_selector(SEL_CODE_CONTAINER, timeout=15000)
+            return {"status": "code_sent"}
+        except Exception as e:
+            if self.code_future and self.code_future.done():
+                return {"status": "code_sent"}
+            return {"error": f"no_code_after_captcha: {e}"}
 
     async def submit_code(self, code: str) -> dict:
         """Ввести код, забрать OAuth-код, сохранить токен и cookies."""

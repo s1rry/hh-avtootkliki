@@ -370,6 +370,7 @@ async def btn_settings(message: Message, **kw):
         [InlineKeyboardButton(text="✉️ Контакт для писем", callback_data="task:input:contact")],
         [InlineKeyboardButton(text="📨 Пересылка сообщений (2-й ТГ)", callback_data="ub:menu")],
         [InlineKeyboardButton(text="🗑 Убрать отказы на hh", callback_data="acc:hide_rej")],
+        [InlineKeyboardButton(text="📄 Клонировать резюме", callback_data="acc:clone_resume")],
         [InlineKeyboardButton(text="🔗 Мои аккаунты", callback_data="acc:list")],
         [InlineKeyboardButton(text="🚪 Выйти из основного hh", callback_data="acc:logout")],
         [InlineKeyboardButton(text="💎 Тариф", callback_data="task:tariff")],
@@ -513,6 +514,33 @@ async def cb_hide_rejections(cb: CallbackQuery, **kw):
         f"(проверено откликов: {res['checked']}).",
         parse_mode="HTML",
     )
+
+
+@router.callback_query(F.data == "acc:clone_resume")
+async def cb_clone_resume(cb: CallbackQuery, **kw):
+    from app.parsers.hh_user_client import HHUserClient
+    await cb.answer("Клонирую резюме на hh...")
+    async with async_session() as session:
+        user = await _load(session, cb)
+        if not user.hh_connected or not user.hh_access_token:
+            await cb.message.answer("Сначала подключи hh: /connect")
+            return
+        client = HHUserClient(
+            access_token=user.hh_access_token,
+            refresh_token=user.hh_refresh_token or "",
+            resume_id=user.hh_resume_id,
+            expires_at=user.hh_token_expires.timestamp() if user.hh_token_expires else 0.0,
+        )
+    res = await client.clone_resume()
+    if res.get("ok"):
+        await cb.message.answer(
+            "📄 <b>Резюме клонировано.</b> Свежая копия позволяет откликаться "
+            "заново на вакансии, куда ты уже откликался. Опубликуй копию на hh, "
+            "если нужно — и укажи её при подключении/переподключении.",
+            parse_mode="HTML",
+        )
+    else:
+        await cb.message.answer(f"⚠️ Не удалось клонировать резюме: {res.get('error')}")
 
 
 @router.callback_query(F.data == "acc:logout")

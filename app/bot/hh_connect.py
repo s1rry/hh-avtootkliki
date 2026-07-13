@@ -31,7 +31,20 @@ router = Router()
 
 class ConnectSG(StatesGroup):
     phone = State()
+    captcha = State()
     code = State()
+
+
+async def _send_captcha(message: Message):
+    from aiogram.types import FSInputFile
+    from app.parsers.hh_login import CAPTCHA_FILE
+    try:
+        await message.answer_photo(
+            FSInputFile(str(CAPTCHA_FILE)),
+            caption="🔐 hh просит капчу. Введи символы с картинки одним сообщением.\n\nОтмена: /cancel",
+        )
+    except Exception:
+        await message.answer("hh просит капчу, но картинку показать не удалось. Попробуй /connect ещё раз.")
 
 
 async def _is_cancel(message: Message, state: FSMContext) -> bool:
@@ -73,15 +86,36 @@ async def connect_phone(message: Message, state: FSMContext, **kw):
         await state.set_state(ConnectSG.code)
         await message.answer("📩 hh отправил код. Пришли его сюда одним сообщением.")
     elif res.get("status") == "captcha":
-        await sess.cancel()
-        await state.clear()
-        await message.answer(
-            "hh просит капчу — сейчас автоматически не пройти. Попробуй /connect чуть позже."
-        )
+        set_session(message.chat.id, sess)
+        await state.set_state(ConnectSG.captcha)
+        await _send_captcha(message)
     else:
         await sess.cancel()
         await state.clear()
         await message.answer(f"❌ Не удалось начать вход: {res.get('error')}\nПопробуй /connect ещё раз.")
+
+
+@router.message(ConnectSG.captcha)
+async def connect_captcha(message: Message, state: FSMContext, **kw):
+    if await _is_cancel(message, state):
+        return
+    sess = get_session(message.chat.id)
+    if not sess:
+        await state.clear()
+        await message.answer("Сессия входа потеряна. Начни заново: /connect")
+        return
+    await message.answer("⏳ Проверяю капчу...")
+    res = await sess.submit_captcha((message.text or "").strip())
+    if res.get("status") == "code_sent":
+        await state.set_state(ConnectSG.code)
+        await message.answer("✅ Капча принята. hh отправил код — пришли его сюда.")
+    elif res.get("status") == "captcha":
+        await _send_captcha(message)  # не та капча — новая картинка
+    else:
+        await sess.cancel()
+        await drop_session(message.chat.id)
+        await state.clear()
+        await message.answer(f"❌ Не прошло: {res.get('error')}\nПопробуй /connect заново.")
 
 
 @router.message(ConnectSG.code)

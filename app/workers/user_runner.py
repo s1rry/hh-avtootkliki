@@ -50,9 +50,11 @@ async def _build_letter(item: dict, title: str, st, resume_text: str) -> str:
     if st.ai_enabled and resume_text:
         snip = item.get("snippet") or {}
         desc = " ".join(x for x in (snip.get("responsibility"), snip.get("requirement")) if x)
+        company = (item.get("employer") or {}).get("name") or ""
         try:
             text, _, _ = await claude_ai.generate_cover_letter(
-                title, desc, resume=resume_text, custom_prompt=(st.ai_custom_prompt or None)
+                title, desc, company_name=company, resume=resume_text,
+                custom_prompt=(st.ai_custom_prompt or None)
             )
             text = (text or "").strip()
             low = text.lower()

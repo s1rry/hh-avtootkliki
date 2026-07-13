@@ -136,6 +136,30 @@ class HHUserClient:
             log.warning("bump_resume_error", error=str(e))
             return False
 
+    async def clone_resume(self) -> dict:
+        """Клонировать резюме (POST /resume_profile) — как в hh-applicant-tool.
+
+        Даёт свежую копию, чтобы обойти запрет hh откликаться на вакансию дважды.
+        Возвращает {"ok": bool, "error": ...}.
+        """
+        if not self.resume_id:
+            return {"ok": False, "error": "no_resume_id"}
+        if not await self.ensure_token():
+            return {"ok": False, "error": "no_token"}
+        headers = {"Authorization": f"Bearer {self.access_token}", "User-Agent": UA,
+                   "Content-Type": "application/json"}
+        payload = {"clone_resume_id": self.resume_id, "additional_properties": {"any_job": True}}
+        try:
+            async with httpx.AsyncClient(timeout=20) as c:
+                r = await c.post(f"{API}/resume_profile", headers=headers, json=payload)
+            if r.status_code in (200, 201, 204):
+                return {"ok": True}
+            log.warning("clone_resume_failed", status=r.status_code, body=r.text[:200])
+            return {"ok": False, "error": f"hh {r.status_code}"}
+        except Exception as e:
+            log.warning("clone_resume_error", error=str(e))
+            return {"ok": False, "error": str(e)[:120]}
+
     async def hide_rejections(self, max_pages: int = 20) -> dict:
         """Скрыть отклики со статусом «отказ» (discard) в списке откликов hh.
 
