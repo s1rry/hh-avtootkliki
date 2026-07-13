@@ -160,6 +160,11 @@ class NewTaskSG(StatesGroup):
     keyword = State()
 
 
+def _task_resume_line(t) -> str:
+    """Короткая подпись резюме задачи для списка."""
+    return f" · 📄 {t.resume_title[:24]}" if getattr(t, "resume_title", None) else ""
+
+
 async def _tasks_view(cb: CallbackQuery):
     from app.services.search_tasks import list_tasks, ensure_seeded
     b = InlineKeyboardButton
@@ -170,7 +175,7 @@ async def _tasks_view(cb: CallbackQuery):
     rows = []
     for t in tasks:
         mark = "🟢" if t.is_active else "⚪️"
-        rows.append([b(text=f"{mark} {t.keyword[:36]}", callback_data=f"task:tgl:{t.id}"),
+        rows.append([b(text=f"{mark} {t.keyword[:28]}{_task_resume_line(t)}", callback_data=f"task:tgl:{t.id}"),
                      b(text="🗑", callback_data=f"task:del:{t.id}")])
     rows.append([b(text="➕ Новая задача", callback_data="task:newtask")])
     rows.append([b(text="⬅️ Назад", callback_data="task:menu")])
@@ -221,30 +226,80 @@ async def cb_task_del(cb: CallbackQuery, **kw):
 
 @router.callback_query(F.data == "task:newtask")
 async def cb_newtask(cb: CallbackQuery, state: FSMContext, **kw):
-    await state.set_state(NewTaskSG.keyword)
+    """Шаг 1: выбор резюме, которым будет откликаться задача."""
+    from app.parsers.hh_resume import list_resumes
+    b = InlineKeyboardButton
+    await cb.answer("Загружаю резюме...")
+    async with async_session() as session:
+        user = await _load(session, cb)
+        if not user.hh_connected or not user.hh_access_token:
+            await cb.message.answer("Сначала подключи hh: /connect")
+            return
+        token = user.hh_access_token
+    resumes = await list_resumes(token)
+    if not resumes:
+        # Нет списка резюме — заводим задачу на резюме аккаунта, сразу спрашиваем ключ.
+        await state.set_state(NewTaskSG.keyword)
+        await state.update_data(resume_id=None, resume_title=None, resume_text=None)
+        await _ask_keyword(cb.message)
+        return
+    rows = [[b(text=f"📄 {r['title'][:48]}", callback_data=f"task:ntres:{r['id']}")]
+            for r in resumes[:20]]
+    rows.append([b(text="❌ Отмена", callback_data="task:menu")])
     await cb.message.answer(
-        "➕ <b>Новая задача</b>\n\nПришли ОДНО название должности для поиска "
-        "(например <code>системный аналитик</code>). Будем искать вакансии строго "
-        "с этим названием.\n\nОтмена: /task",
+        "📄 <b>Шаг 1 из 2: каким резюме откликаемся?</b>\n\n"
+        "Задача будет откликаться на вакансии именно этим резюме "
+        "и письма писать по нему.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="HTML",
+    )
+
+
+async def _ask_keyword(msg):
+    await msg.answer(
+        "🔍 <b>Шаг 2 из 2: какие вакансии ищем?</b>\n\n"
+        "Пришли ОДНО название должности (например <code>системный аналитик</code>). "
+        "Ищем вакансии строго с этим названием.\n\nОтмена: /task",
         parse_mode="HTML",
     )
-    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("task:ntres:"))
+async def cb_newtask_resume(cb: CallbackQuery, state: FSMContext, **kw):
+    from app.parsers.hh_resume import fetch_resume_by_id
+    rid = cb.data.split(":", 2)[2]
+    async with async_session() as session:
+        user = await _load(session, cb)
+        token = user.hh_access_token
+    rid2, text, title = await fetch_resume_by_id(token, rid)
+    if not rid2:
+        await cb.answer("Не удалось загрузить резюме", show_alert=True)
+        return
+    await state.set_state(NewTaskSG.keyword)
+    await state.update_data(resume_id=rid2, resume_title=title, resume_text=text)
+    await cb.answer("Резюме выбрано")
+    await _ask_keyword(cb.message)
 
 
 @router.message(NewTaskSG.keyword)
 async def on_newtask(message: Message, state: FSMContext, **kw):
     from app.models.search_task import SearchTask
     kw_text = (message.text or "").strip()
+    data = await state.get_data()
     await state.clear()
     if not kw_text or kw_text.startswith("/"):
         await message.answer("Пусто. Добавить задачу: 📋 Задача → ➕ Новая задача.")
         return
     async with async_session() as session:
         user = await _load(session, message)
-        session.add(SearchTask(user_id=user.id, keyword=kw_text, is_active=True))
+        session.add(SearchTask(
+            user_id=user.id, keyword=kw_text, is_active=True,
+            resume_id=data.get("resume_id"), resume_title=data.get("resume_title"),
+            resume_text=data.get("resume_text"),
+        ))
         await session.commit()
         s, active = user.get_settings(), user.is_active
-    await message.answer(f"✅ Задача добавлена: <b>{kw_text}</b>", parse_mode="HTML")
+    res_line = f"\n📄 Резюме: <b>{data.get('resume_title')}</b>" if data.get("resume_title") else ""
+    await message.answer(f"✅ Задача добавлена: <b>{kw_text}</b>{res_line}", parse_mode="HTML")
     await _show_main(message, s, active)
 
 
@@ -329,44 +384,60 @@ async def btn_task(message: Message, state: FSMContext, **kw):
     await cmd_task(message, state)
 
 
+def _bar(pct: int, width: int = 10) -> str:
+    """Полоска прогресса из блоков: ▓ заполнено, ░ пусто."""
+    fill = max(0, min(width, round(pct / 100 * width)))
+    return "▓" * fill + "░" * (width - fill)
+
+
 @router.message(F.text == BTN_STATS)
 async def btn_stats(message: Message, **kw):
+    async def _count(session, *conds) -> int:
+        return (await session.execute(
+            select(func.count(Vacancy.id)).where(Vacancy.user_id == user_id, *conds)
+        )).scalar() or 0
+
     async with async_session() as session:
         user = await _load(session, message)
-        total = (await session.execute(
+        user_id = user.id
+        active = user.is_active
+        s = user.get_settings()
+        # Реальные отправленные отклики.
+        sent = (await session.execute(
             select(func.count(Application.id)).where(
-                Application.user_id == user.id, Application.status == ApplicationStatus.SENT)
+                Application.user_id == user_id, Application.status == ApplicationStatus.SENT)
         )).scalar() or 0
         today = (await session.execute(
             select(func.count(Application.id)).where(
-                Application.user_id == user.id, Application.status == ApplicationStatus.SENT,
+                Application.user_id == user_id, Application.status == ApplicationStatus.SENT,
                 func.date(Application.created_at) == func.current_date())
         )).scalar() or 0
-        active = user.is_active
-        s = user.get_settings()
-        # Отсеяно умным отбором: вакансии с проставленной ИИ-оценкой и статусом REJECTED.
-        filtered = (await session.execute(
-            select(func.count(Vacancy.id)).where(
-                Vacancy.user_id == user.id,
-                Vacancy.status == VacancyStatus.REJECTED,
-                Vacancy.ai_score.is_not(None))
-        )).scalar() or 0
-        scored_total = (await session.execute(
-            select(func.count(Vacancy.id)).where(
-                Vacancy.user_id == user.id, Vacancy.ai_score.is_not(None))
-        )).scalar() or 0
+        # Разбивка по обработанным вакансиям.
+        processed = await _count(session)
+        ai_low = await _count(session, Vacancy.skip_reason == "ai_low")
+        already = await _count(session, Vacancy.skip_reason == "already")
+        needs_test = await _count(session, Vacancy.skip_reason == "needs_test")
+
+    def pct(n: int) -> int:
+        return round(n / processed * 100) if processed else 0
+
     lines = [
         "📊 <b>Статистика</b>\n",
-        f"Откликов всего: <b>{total}</b>",
-        f"Сегодня: <b>{today}</b>",
-        f"Автоотклик: <b>{'работает' if active else 'остановлен'}</b>",
+        f"Всего обработано вакансий: <b>{processed}</b>",
+        f"Сегодня отправлено: <b>{today}</b> · Автоотклик: <b>{'работает' if active else 'остановлен'}</b>\n",
+        f"✅ Отправлено откликов: <b>{sent}</b> ({pct(sent)}%)",
+        _bar(pct(sent)),
     ]
-    if s.ai_score_enabled or scored_total:
-        lines.append(
-            f"\n🎯 Умный отбор (от {s.ai_score_min}%):\n"
-            f"• оценено ИИ: <b>{scored_total}</b>\n"
-            f"• отсеяно как слабые: <b>{filtered}</b>"
-        )
+    if s.ai_score_enabled or ai_low:
+        lines += [f"🤖 Не подошли (фильтр ИИ): <b>{ai_low}</b> ({pct(ai_low)}%)", _bar(pct(ai_low))]
+    if already:
+        lines += [f"🔁 Уже откликались: <b>{already}</b> ({pct(already)}%)", _bar(pct(already))]
+    if needs_test:
+        lines += [f"📝 Нужен тест на НН: <b>{needs_test}</b> ({pct(needs_test)}%)", _bar(pct(needs_test))]
+    lines.append(
+        "\nℹ️ «Фильтр ИИ» и «уже откликались» — это норма: бот бережёт "
+        "отклики и не тратит их на нерелевантные вакансии и дубли."
+    )
     await message.answer("\n".join(lines), parse_mode="HTML")
 
 
@@ -827,7 +898,7 @@ async def cb_reconsider(cb: CallbackQuery, **kw):
         res = await session.execute(
             update(Vacancy)
             .where(Vacancy.user_id == user.id, Vacancy.status == VacancyStatus.REJECTED)
-            .values(status=VacancyStatus.NEW, ai_score=None, ai_reason=None)
+            .values(status=VacancyStatus.NEW, ai_score=None, ai_reason=None, skip_reason=None)
         )
         await session.commit()
     n = res.rowcount or 0

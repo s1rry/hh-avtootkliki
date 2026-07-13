@@ -33,3 +33,12 @@ async def active_keywords(session: AsyncSession, user_id: int) -> list[str]:
             SearchTask.user_id == user_id, SearchTask.is_active.is_(True))
         .order_by(SearchTask.id)
     )).scalars().all())
+
+
+async def active_tasks(session: AsyncSession, user_id: int) -> list[SearchTask]:
+    """Активные задачи целиком (ключ + своё резюме) для прогона автоотклика."""
+    return list((await session.execute(
+        select(SearchTask).where(
+            SearchTask.user_id == user_id, SearchTask.is_active.is_(True))
+        .order_by(SearchTask.id)
+    )).scalars().all())

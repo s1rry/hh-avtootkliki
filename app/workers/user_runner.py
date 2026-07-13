@@ -88,6 +88,17 @@ async def _sent_today(session, user_id: int, account_ref: str) -> int:
     )).scalar() or 0
 
 
+async def _mark_skip(vac_id: int, reason: str) -> None:
+    """Пометить вакансию как пропущенную (для статистики) и убрать из будущих
+    прогонов (REJECTED → дедуп её больше не берёт)."""
+    async with async_session() as session:
+        v = await session.get(Vacancy, vac_id)
+        if v:
+            v.skip_reason = reason
+            v.status = VacancyStatus.REJECTED
+            await session.commit()
+
+
 async def _account_contexts(session, user) -> list[dict]:
     """Список аккаунтов для прогона: основной (User.hh_*) + активные доп."""
     from app.models.hh_account import HHAccount
@@ -153,12 +164,19 @@ async def run_user_cycle(user_id: int) -> int:
         if not user or not user.is_active:
             return 0
         st = user.get_settings()
-        # Ключевые слова из активных задач (fallback — старое поле search_text).
-        from app.services.search_tasks import ensure_seeded, active_keywords
+        # Задачи из активных SearchTask (ключ + своё резюме).
+        # Fallback — старые ключевые фразы без привязки резюме.
+        from app.services.search_tasks import ensure_seeded, active_tasks
         await ensure_seeded(session, user)
-        phrases = await active_keywords(session, user.id) or st.search_phrases()
+        task_objs = await active_tasks(session, user.id)
+        if task_objs:
+            tasks = [{"keyword": t.keyword, "resume_id": t.resume_id,
+                      "resume_text": t.resume_text} for t in task_objs]
+        else:
+            tasks = [{"keyword": p, "resume_id": None, "resume_text": None}
+                     for p in st.search_phrases()]
         # Без ключевых слов hh вернёт всё подряд — не откликаемся во избежание спама.
-        if not phrases:
+        if not tasks:
             log.info("user_no_keywords_skip", user_id=user.id)
             return 0
         if not _within_window(st.apply_hour_start, st.apply_hour_end):
@@ -169,17 +187,22 @@ async def run_user_cycle(user_id: int) -> int:
     for ctx in contexts:
         ctx["user_id"] = user_id
         try:
-            total += await run_account_cycle(user_id, st, ctx, phrases)
+            total += await run_account_cycle(user_id, st, ctx, tasks)
         except Exception as e:
             log.error("account_cycle_error", user_id=user_id, ref=ctx["ref"], error=str(e))
     log.info("user_cycle_done", user_id=user_id, applied=total, accounts=len(contexts))
     return total
 
 
-async def run_account_cycle(user_id: int, st, ctx: dict, phrases: list[str]) -> int:
-    """Один цикл автоотклика для одного hh-аккаунта (свой дедуп и лимит)."""
+async def run_account_cycle(user_id: int, st, ctx: dict, tasks: list[dict]) -> int:
+    """Один цикл автоотклика для одного hh-аккаунта (свой дедуп и лимит).
+
+    tasks — список задач {keyword, resume_id, resume_text}. Каждая задача
+    ищет по своему ключу и откликается своим резюме (fallback — резюме аккаунта).
+    """
     ref = ctx["ref"]
-    resume_text = ctx["resume_text"]
+    account_resume_id = ctx["resume_id"]
+    account_resume_text = ctx["resume_text"]
     applied = 0
     async with async_session() as session:
         remaining = st.daily_limit - await _sent_today(session, user_id, ref)
@@ -191,16 +214,20 @@ async def run_account_cycle(user_id: int, st, ctx: dict, phrases: list[str]) -> 
         resume_id=ctx["resume_id"], expires_at=ctx["expires_at"],
     )
     base_params = st.to_hh_params()
-    phrases = phrases or [""]
+    tasks = tasks or [{"keyword": "", "resume_id": None, "resume_text": None}]
     excluded = st.excluded_words()
     scored = 0
     seen = 0
     stop = False
-    # Ищем по каждой ключевой фразе отдельным запросом (hh не понимает OR),
-    # с пагинацией вглубь — топ быстро исчерпывается уже отработанным.
-    for phrase in phrases:
+    # Ищем по каждой задаче отдельным запросом (hh не понимает OR), с пагинацией
+    # вглубь — топ быстро исчерпывается уже отработанным. Резюме — своё на задачу.
+    for task in tasks:
         if stop or applied >= remaining:
             break
+        phrase = task.get("keyword") or ""
+        resume_id = task.get("resume_id") or account_resume_id
+        resume_text = task.get("resume_text") or account_resume_text
+        client.resume_id = resume_id  # переключаем резюме под задачу
         for page in range(MAX_SEARCH_PAGES):
             if applied >= remaining:
                 break
@@ -270,6 +297,7 @@ async def run_account_cycle(user_id: int, st, ctx: dict, phrases: list[str]) -> 
                                 v.ai_score = float(score)
                                 if score < st.ai_score_min:
                                     v.status = VacancyStatus.REJECTED
+                                    v.skip_reason = "ai_low"
                                     v.ai_reason = f"Умный отбор: {score}% < порога {st.ai_score_min}%"
                                 await session.commit()
                         if score < st.ai_score_min:
@@ -287,9 +315,11 @@ async def run_account_cycle(user_id: int, st, ctx: dict, phrases: list[str]) -> 
                             result, info = await client.apply_with_test(vid, letter, cookies_state)
                             if result is not True:
                                 log.info("test_apply_skip", user_id=user_id, vid=vid, info=info)
+                                await _mark_skip(vac_id, "needs_test")
                                 continue
                         else:
                             # Нет веб-сессии/ИИ — не тратим на тест-вакансию.
+                            await _mark_skip(vac_id, "needs_test")
                             continue
                     else:
                         result, info = await client.apply(vid, letter)
@@ -316,6 +346,8 @@ async def run_account_cycle(user_id: int, st, ctx: dict, phrases: list[str]) -> 
                     v = await session.get(Vacancy, vac_id)
                     if v and (success or already):
                         v.status = VacancyStatus.APPLIED
+                        if already:
+                            v.skip_reason = "already"
                     await session.commit()
 
                 if success:

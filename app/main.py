@@ -38,8 +38,13 @@ async def init_db():
                     "tg_userbot_active": "BOOLEAN DEFAULT 0",
                 "hh_cookies": "TEXT",
                 },
-                "vacancies": {"account_ref": "VARCHAR(32)"},
+                "vacancies": {"account_ref": "VARCHAR(32)", "skip_reason": "VARCHAR(20)"},
                 "applications": {"account_ref": "VARCHAR(32)"},
+                "search_tasks": {
+                    "resume_id": "VARCHAR(64)",
+                    "resume_title": "VARCHAR(255)",
+                    "resume_text": "TEXT",
+                },
             }
             for table, add in migrations.items():
                 cols = {r[1] for r in (await conn.exec_driver_sql(
@@ -56,6 +61,13 @@ async def init_db():
                     f"UPDATE {table} SET account_ref = 'u' || user_id "
                     f"WHERE account_ref IS NULL AND user_id IS NOT NULL"
                 )
+            # Бэкфилл skip_reason для старых отсеянных ИИ вакансий — чтобы
+            # новая статистика показала историю, а не только новые прогоны.
+            await conn.exec_driver_sql(
+                "UPDATE vacancies SET skip_reason = 'ai_low' "
+                "WHERE skip_reason IS NULL AND status = 'rejected' "
+                "AND ai_score IS NOT NULL"
+            )
     # Ограничить доступ к файлу БД (в нём токены/сессии) — только владелец.
     if settings.database_url.startswith("sqlite"):
         import os
