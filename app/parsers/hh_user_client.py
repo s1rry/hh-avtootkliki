@@ -8,6 +8,7 @@ Per-user клиент hh.ru (Фаза 3, мультиюзер).
 from __future__ import annotations
 
 import json
+import re
 import time
 
 import httpx
@@ -159,6 +160,74 @@ class HHUserClient:
         except Exception as e:
             log.warning("clone_resume_error", error=str(e))
             return {"ok": False, "error": str(e)[:120]}
+
+    async def apply_with_test(self, vacancy_id: str, letter: str, cookies_state: dict) -> tuple[bool | str, dict]:
+        """Отклик на вакансию с тестом через веб (как hh-applicant-tool).
+
+        Парсит vacancyTests со страницы отклика, отвечает ИИ, шлёт форму на
+        /applicant/vacancy_response/popup. Требует веб-cookies. Хрупко (веб hh
+        может меняться) — best-effort: при любой проблеме возвращает (False, ...).
+        """
+        from app.ai.claude import claude_ai
+
+        web_cookies: dict[str, str] = {}
+        for ck in (cookies_state or {}).get("cookies") or []:
+            if "hh.ru" in (ck.get("domain") or ""):
+                web_cookies[ck.get("name")] = ck.get("value")
+        xsrf = web_cookies.get("_xsrf")
+        if not xsrf:
+            return False, {"error": "no_web_session"}
+
+        resp_url = (f"https://hh.ru/applicant/vacancy_response?vacancyId={vacancy_id}"
+                    "&startedWithQuestion=false&hhtmFrom=vacancy")
+        try:
+            async with httpx.AsyncClient(timeout=25) as c:
+                r = await c.get(resp_url, cookies=web_cookies, headers={"User-Agent": UA})
+                marker = ',"vacancyTests":'
+                pos = r.text.find(marker)
+                if pos == -1:
+                    return False, {"error": "no_tests_marker"}
+                tests_data, _ = json.JSONDecoder().raw_decode(r.text, pos + len(marker))
+                test_data = (tests_data or {}).get(str(vacancy_id))
+                if not test_data:
+                    return False, {"error": "no_test_data"}
+
+                payload = {
+                    "_xsrf": xsrf, "uidPk": test_data["uidPk"], "guid": test_data["guid"],
+                    "startTime": test_data["startTime"], "testRequired": test_data["required"],
+                    "vacancy_id": vacancy_id, "resume_hash": self.resume_id,
+                    "ignore_postponed": "true", "incomplete": "false",
+                    "mark_applicant_visible_in_vacancy_country": "false",
+                    "country_ids": "[]", "lux": "true", "withoutTest": "no", "letter": letter,
+                }
+                for task in test_data.get("tasks") or []:
+                    field = f"task_{task['id']}"
+                    solutions = task.get("candidateSolutions") or []
+                    question = re.sub(r"<[^>]+>", " ", task.get("description") or "").strip()
+                    if solutions:
+                        opts = "\n".join(f"{s['id']}: {re.sub(r'<[^>]+>', ' ', s['text'])}" for s in solutions)
+                        ans = await claude_ai.complete(
+                            f"Вопрос: {question}\nВарианты:\n{opts}\nВыбери ID правильного ответа. Пришли только ID.")
+                        m = re.search(r"\d+", ans or "")
+                        payload[field] = m.group(0) if m else str(solutions[len(solutions) // 2]["id"])
+                    else:
+                        ans = await claude_ai.complete(f"Дай краткий профессиональный ответ на вопрос: {question}")
+                        payload[f"{field}_text"] = ans or "Да"
+
+                pr = await c.post(
+                    "https://hh.ru/applicant/vacancy_response/popup",
+                    data=payload, cookies=web_cookies,
+                    headers={"Referer": resp_url, "X-Hhtmfrom": "vacancy",
+                             "X-Hhtmsource": "vacancy_response", "X-Requested-With": "XMLHttpRequest",
+                             "X-Xsrftoken": xsrf, "User-Agent": UA},
+                )
+                if pr.status_code in (200, 201, 204):
+                    return True, {"via": "test"}
+                log.warning("apply_with_test_failed", status=pr.status_code, body=pr.text[:200])
+                return False, {"status": pr.status_code}
+        except Exception as e:
+            log.warning("apply_with_test_error", error=str(e))
+            return False, {"error": str(e)[:120]}
 
     async def hide_rejections(self, cookies_state: dict | None = None, max_pages: int = 20) -> dict:
         """Скрыть чаты-отказы (state=discard) из списка откликов hh.

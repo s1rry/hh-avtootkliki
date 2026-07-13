@@ -203,6 +203,18 @@ class ClaudeAI:
         log.info("ai_cover_letter_generated", title=vacancy_title[:60])
         return text.strip(), inp_tok, out_tok
 
+    async def complete(self, prompt: str, max_tokens: int = 300) -> str:
+        """Простой запрос к ИИ (для ответов на тесты вакансий и т.п.)."""
+        try:
+            text, _, _ = await self._call(
+                "Ты помощник кандидата. Отвечай кратко, по делу, без воды.",
+                prompt, max_tokens=max_tokens,
+            )
+            return (text or "").strip()
+        except Exception as e:
+            log.warning("ai_complete_failed", error=str(e))
+            return ""
+
     async def score_vacancy(self, vacancy_title: str, vacancy_description: str, resume: str) -> int | None:
         """Оценка соответствия вакансии резюме, 0–100. None — ИИ недоступен/не
         дал число (вызывающий решает: при строгом отборе такую вакансию лучше

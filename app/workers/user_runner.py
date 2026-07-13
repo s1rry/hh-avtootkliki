@@ -93,6 +93,13 @@ async def _account_contexts(session, user) -> list[dict]:
     from app.models.hh_account import HHAccount
     ctxs: list[dict] = []
     if user.hh_connected and user.hh_access_token:
+        import json
+        cookies = None
+        if user.hh_cookies:
+            try:
+                cookies = json.loads(user.hh_cookies)
+            except Exception:
+                cookies = None
         ctxs.append({
             "ref": f"u{user.id}", "kind": "primary", "id": None,
             "access_token": user.hh_access_token,
@@ -100,6 +107,7 @@ async def _account_contexts(session, user) -> list[dict]:
             "resume_id": user.hh_resume_id,
             "expires_at": user.hh_token_expires.timestamp() if user.hh_token_expires else 0.0,
             "resume_text": user.resume_text or "",
+            "cookies": cookies,
         })
     accs = (await session.execute(
         select(HHAccount).where(HHAccount.user_id == user.id, HHAccount.is_active.is_(True))
@@ -272,7 +280,19 @@ async def run_account_cycle(user_id: int, st, ctx: dict, phrases: list[str]) -> 
 
                 letter = await _build_letter(item, title, st, resume_text)
                 try:
-                    result, info = await client.apply(vid, letter)
+                    if item.get("has_test"):
+                        # Вакансия с тестом: обычный API-отклик не пройдёт.
+                        cookies_state = ctx.get("cookies")
+                        if cookies_state and st.ai_enabled and resume_text:
+                            result, info = await client.apply_with_test(vid, letter, cookies_state)
+                            if result is not True:
+                                log.info("test_apply_skip", user_id=user_id, vid=vid, info=info)
+                                continue
+                        else:
+                            # Нет веб-сессии/ИИ — не тратим на тест-вакансию.
+                            continue
+                    else:
+                        result, info = await client.apply(vid, letter)
                 except Exception as e:
                     log.error("user_apply_error", user_id=user_id, vid=vid, error=str(e))
                     continue

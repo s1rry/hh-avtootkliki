@@ -391,7 +391,8 @@ async def btn_settings(message: Message, **kw):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✉️ Контакт для писем", callback_data="task:input:contact")],
         [InlineKeyboardButton(text="📨 Пересылка сообщений (2-й ТГ)", callback_data="ub:menu")],
-        [InlineKeyboardButton(text="📄 Клонировать резюме", callback_data="acc:clone_resume")],
+        [InlineKeyboardButton(text="📄 Выбрать резюме", callback_data="acc:resumes"),
+         InlineKeyboardButton(text="📄 Клонировать", callback_data="acc:clone_resume")],
         [InlineKeyboardButton(text="🔗 Мои аккаунты", callback_data="acc:list")],
         [InlineKeyboardButton(text="🚪 Выйти из основного hh", callback_data="acc:logout")],
         [InlineKeyboardButton(text="💎 Тариф", callback_data="task:tariff")],
@@ -551,6 +552,54 @@ async def cb_hide_rejections(cb: CallbackQuery, **kw):
         f"(проверено откликов: {res['checked']}). Обнови страницу hh.",
         parse_mode="HTML",
     )
+
+
+@router.callback_query(F.data == "acc:resumes")
+async def cb_resumes(cb: CallbackQuery, **kw):
+    from app.parsers.hh_resume import list_resumes
+    await cb.answer("Загружаю резюме...")
+    async with async_session() as session:
+        user = await _load(session, cb)
+        if not user.hh_connected or not user.hh_access_token:
+            await cb.message.answer("Сначала подключи hh: /connect")
+            return
+        token = user.hh_access_token
+        current = user.hh_resume_id
+    resumes = await list_resumes(token)
+    if not resumes:
+        await cb.message.answer("Не удалось получить список резюме. Проверь, что на hh есть опубликованное резюме.")
+        return
+    rows = []
+    for r in resumes[:20]:
+        mark = "✅ " if r["id"] == current else ""
+        rows.append([InlineKeyboardButton(text=f"{mark}{r['title'][:48]}", callback_data=f"acc:setres:{r['id']}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="task:menu")])
+    await cb.message.answer(
+        "📄 <b>Выбери резюме для откликов</b>\n\nБот будет откликаться этим резюме "
+        "и писать письма по нему.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("acc:setres:"))
+async def cb_set_resume(cb: CallbackQuery, **kw):
+    from app.parsers.hh_resume import fetch_resume_by_id
+    rid = cb.data.split(":", 2)[2]
+    async with async_session() as session:
+        user = await _load(session, cb)
+        token = user.hh_access_token
+    rid2, text, title = await fetch_resume_by_id(token, rid)
+    if not rid2:
+        await cb.answer("Не удалось загрузить резюме", show_alert=True)
+        return
+    async with async_session() as session:
+        user = await _load(session, cb)
+        user.hh_resume_id = rid2
+        if text:
+            user.resume_text = text
+        await session.commit()
+    await cb.answer("Резюме выбрано")
+    await cb.message.answer(f"✅ Резюме для откликов: <b>{title or 'выбрано'}</b>", parse_mode="HTML")
 
 
 @router.callback_query(F.data == "acc:clone_resume")

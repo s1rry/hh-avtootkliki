@@ -44,6 +44,38 @@ def _resume_to_text(data: dict) -> str:
     return "\n".join(p for p in parts if p).strip()
 
 
+async def list_resumes(access_token: str) -> list[dict]:
+    """Список резюме пользователя: [{id, title}]. Пусто при ошибке."""
+    headers = {"Authorization": f"Bearer {access_token}", "User-Agent": UA}
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.get(f"{API}/resumes/mine", headers=headers)
+        if r.status_code != 200:
+            log.warning("resumes_list_failed", status=r.status_code)
+            return []
+        items = (r.json() or {}).get("items") or []
+        return [{"id": it.get("id"), "title": it.get("title") or "резюме"}
+                for it in items if it.get("id")]
+    except Exception as e:
+        log.error("list_resumes_error", error=str(e))
+        return []
+
+
+async def fetch_resume_by_id(access_token: str, resume_id: str) -> tuple[str | None, str | None, str | None]:
+    """Вернуть (resume_id, text, title) для конкретного резюме."""
+    headers = {"Authorization": f"Bearer {access_token}", "User-Agent": UA}
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            rr = await c.get(f"{API}/resumes/{resume_id}", headers=headers)
+        data = rr.json() if rr.status_code == 200 else {}
+        if not data:
+            return None, None, None
+        return resume_id, _resume_to_text(data), data.get("title")
+    except Exception as e:
+        log.error("fetch_resume_by_id_error", error=str(e))
+        return None, None, None
+
+
 async def fetch_resume(access_token: str) -> tuple[str | None, str | None, str | None]:
     """
     Вернуть (resume_id, resume_text, title) первого резюме пользователя.
