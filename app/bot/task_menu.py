@@ -507,6 +507,7 @@ async def cb_acc_add(cb: CallbackQuery, state: FSMContext, **kw):
 async def cb_hide_rejections(cb: CallbackQuery, **kw):
     from app.parsers.hh_user_client import HHUserClient
     await cb.answer("Читаю отклики на hh...")
+    import json
     async with async_session() as session:
         user = await _load(session, cb)
         if not user.hh_connected or not user.hh_access_token:
@@ -518,7 +519,13 @@ async def cb_hide_rejections(cb: CallbackQuery, **kw):
             resume_id=user.hh_resume_id,
             expires_at=user.hh_token_expires.timestamp() if user.hh_token_expires else 0.0,
         )
-    res = await client.hide_rejections()
+        cookies_state = None
+        if user.hh_cookies:
+            try:
+                cookies_state = json.loads(user.hh_cookies)
+            except Exception:
+                cookies_state = None
+    res = await client.hide_rejections(cookies_state=cookies_state)
     if client.new_token:
         import datetime
         async with async_session() as session:
@@ -531,9 +538,18 @@ async def cb_hide_rejections(cb: CallbackQuery, **kw):
     if res.get("error"):
         await cb.message.answer(f"⚠️ Не удалось убрать отказы: {res['error']}")
         return
+    if not res.get("web"):
+        await cb.message.answer(
+            "⚠️ Нет веб-сессии для полного скрытия отказов. Отказы «отменены» по API, "
+            "но в списке могут остаться. Чтобы скрывать их полностью — переподключи hh "
+            "(🚪 выйти → /connect), тогда бот сохранит веб-сессию.\n\n"
+            f"Обработано отказов: <b>{res['hidden']}</b> (проверено: {res['checked']}).",
+            parse_mode="HTML",
+        )
+        return
     await cb.message.answer(
         f"🗑 <b>Готово.</b> Скрыто отказов: <b>{res['hidden']}</b> "
-        f"(проверено откликов: {res['checked']}).",
+        f"(проверено откликов: {res['checked']}). Обнови страницу hh.",
         parse_mode="HTML",
     )
 

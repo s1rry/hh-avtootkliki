@@ -167,10 +167,13 @@ async def connect_code(message: Message, state: FSMContext, **kw):
             await session.commit()
             is_extra = True
         else:
+            import json
             user.hh_access_token = token["access_token"]
             user.hh_refresh_token = token.get("refresh_token", "")
             user.hh_token_expires = expires
             user.hh_connected = True
+            if res.get("cookies"):
+                user.hh_cookies = json.dumps(res["cookies"])
             if resume_id:
                 user.hh_resume_id = resume_id
             if resume_text:

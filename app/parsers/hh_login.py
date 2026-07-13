@@ -171,10 +171,11 @@ class OTPLoginSession:
         if not auth_code:
             return {"error": "empty_oauth_code"}
 
-        # Сохранить cookies-сессию (нужно браузерному прохождению тестов)
+        # Сохранить cookies-сессию (нужна для веб-действий: скрытие отказов, тесты).
+        cookies_state = None
         try:
             COOKIES_FILE.parent.mkdir(parents=True, exist_ok=True)
-            await self.context.storage_state(path=str(COOKIES_FILE))
+            cookies_state = await self.context.storage_state(path=str(COOKIES_FILE))
         except Exception as e:
             log.warning("otp_save_cookies_failed", error=str(e))
 
@@ -183,10 +184,10 @@ class OTPLoginSession:
         if not token:
             return {"error": "token_exchange_failed"}
         # single-режим: сохраняем токен глобально (как раньше).
-        # multi-режим: вызывающий берёт token из результата и кладёт в User.
+        # multi-режим: вызывающий берёт token+cookies из результата и кладёт в User.
         _save_token(token)
         log.info("otp_login_success")
-        return {"status": "ok", "token": token}
+        return {"status": "ok", "token": token, "cookies": cookies_state}
 
     async def _exchange(self, code: str) -> dict | None:
         try:

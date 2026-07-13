@@ -36,6 +36,7 @@ async def init_db():
                     "tg_api_hash": "TEXT",
                     "tg_session": "TEXT",
                     "tg_userbot_active": "BOOLEAN DEFAULT 0",
+                "hh_cookies": "TEXT",
                 },
                 "vacancies": {"account_ref": "VARCHAR(32)"},
                 "applications": {"account_ref": "VARCHAR(32)"},

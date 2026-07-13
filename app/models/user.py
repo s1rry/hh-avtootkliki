@@ -33,6 +33,9 @@ class User(Base, TimestampMixin):
     hh_refresh_token: Mapped[str | None] = mapped_column(EncryptedText)
     hh_token_expires: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     hh_resume_id: Mapped[str | None] = mapped_column(String(64))
+    # Веб-cookies сессии hh.ru (storage_state JSON) — для веб-действий (скрытие
+    # отказов через /applicant/negotiations/trash). Полный доступ к веб-аккаунту.
+    hh_cookies: Mapped[str | None] = mapped_column(EncryptedText)
 
     # Резюме (текст для писем/скоринга).
     resume_text: Mapped[str | None] = mapped_column(Text)

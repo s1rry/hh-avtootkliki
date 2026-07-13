@@ -160,25 +160,42 @@ class HHUserClient:
             log.warning("clone_resume_error", error=str(e))
             return {"ok": False, "error": str(e)[:120]}
 
-    async def hide_rejections(self, max_pages: int = 20) -> dict:
-        """Скрыть отклики со статусом «отказ» (discard) в списке откликов hh.
+    async def hide_rejections(self, cookies_state: dict | None = None, max_pages: int = 20) -> dict:
+        """Скрыть чаты-отказы (state=discard) из списка откликов hh.
 
-        Возвращает {"hidden": N, "checked": M}. hh помечает отказ работодателя
-        state.id == 'discard'; убираем через DELETE /negotiations/active/{id}
-        (как в hh-applicant-tool — этот эндпоинт реально работает по токену).
+        Список отказов берём через API (/negotiations, status=active). А реально
+        СКРЫТЬ чат можно только через веб (POST /applicant/negotiations/trash,
+        substate=HIDE) с веб-куками и XSRF — как делает hh-applicant-tool
+        (--delete-chat). Поэтому нужны cookies_state (storage_state с логина).
+
+        Возвращает {"hidden": N, "checked": M, "web": bool}. web=False → куки не
+        заданы, отказы только «отменены» по API (в списке могут остаться).
         """
         if not await self.ensure_token():
             return {"hidden": 0, "checked": 0, "error": "no_token"}
-        headers = {"Authorization": f"Bearer {self.access_token}", "User-Agent": UA}
+        api_headers = {"Authorization": f"Bearer {self.access_token}", "User-Agent": UA}
+
+        # Веб-куки hh.ru + XSRF из storage_state.
+        web_cookies: dict[str, str] = {}
+        xsrf = None
+        if cookies_state:
+            for ck in (cookies_state.get("cookies") or []):
+                if "hh.ru" in (ck.get("domain") or ""):
+                    web_cookies[ck.get("name")] = ck.get("value")
+            xsrf = web_cookies.get("_xsrf")
+
+        trash_headers = {
+            "X-Hhtmfrom": "main", "X-Hhtmsource": "negotiation_list",
+            "X-Requested-With": "XMLHttpRequest", "X-Xsrftoken": xsrf or "",
+            "Referer": "https://hh.ru/applicant/negotiations?hhtmFrom=main&hhtmFromLabel=header",
+            "User-Agent": UA,
+        }
         hidden = checked = 0
         try:
             async with httpx.AsyncClient(timeout=25) as c:
                 for page in range(max_pages):
-                    r = await c.get(
-                        f"{API}/negotiations",
-                        headers=headers,
-                        params={"page": page, "per_page": 100, "status": "active"},
-                    )
+                    r = await c.get(f"{API}/negotiations", headers=api_headers,
+                                    params={"page": page, "per_page": 100, "status": "active"})
                     if r.status_code != 200:
                         log.warning("negotiations_get_failed", status=r.status_code, body=r.text[:200])
                         break
@@ -188,22 +205,32 @@ class HHUserClient:
                         break
                     for it in items:
                         checked += 1
-                        state = ((it.get("state") or {}).get("id") or "").lower()
-                        if state != "discard":
+                        if ((it.get("state") or {}).get("id") or "").lower() != "discard":
                             continue
                         nid = str(it.get("id") or "")
                         if not nid:
                             continue
-                        dr = await c.delete(f"{API}/negotiations/active/{nid}", headers=headers)
-                        if dr.status_code in (200, 204):
-                            hidden += 1
+                        if xsrf:
+                            tr = await c.post(
+                                "https://hh.ru/applicant/negotiations/trash",
+                                headers=trash_headers, cookies=web_cookies,
+                                data={"topic": nid,
+                                      "query": "?hhtmFrom=main&hhtmFromLabel=header",
+                                      "substate": "HIDE"},
+                            )
+                            if tr.status_code in (200, 204):
+                                hidden += 1
+                        else:
+                            dr = await c.delete(f"{API}/negotiations/active/{nid}", headers=api_headers)
+                            if dr.status_code in (200, 204):
+                                hidden += 1
                     if page + 1 >= (data.get("pages") or 1):
                         break
         except Exception as e:
             log.warning("hide_rejections_error", error=str(e))
-            return {"hidden": hidden, "checked": checked, "error": str(e)[:120]}
-        log.info("hide_rejections_done", hidden=hidden, checked=checked)
-        return {"hidden": hidden, "checked": checked}
+            return {"hidden": hidden, "checked": checked, "web": bool(xsrf), "error": str(e)[:120]}
+        log.info("hide_rejections_done", hidden=hidden, checked=checked, web=bool(xsrf))
+        return {"hidden": hidden, "checked": checked, "web": bool(xsrf)}
 
     async def apply(self, vacancy_id: str, message: str = "") -> tuple[bool | str, dict]:
         """Откликнуться на вакансию токеном пользователя."""
