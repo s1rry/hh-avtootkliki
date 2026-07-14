@@ -77,14 +77,17 @@ def _within_window(start: int, end: int) -> bool:
     return start <= hour < end
 
 
-async def _sent_today(session, user_id: int, account_ref: str) -> int:
+async def _sent_today(session, user_id: int, account_ref: str, task_id: int | None = None) -> int:
+    conds = [
+        Application.user_id == user_id,
+        Application.account_ref == account_ref,
+        Application.status == ApplicationStatus.SENT,
+        func.date(Application.created_at) == func.current_date(),
+    ]
+    if task_id is not None:
+        conds.append(Application.search_task_id == task_id)
     return (await session.execute(
-        select(func.count(Application.id)).where(
-            Application.user_id == user_id,
-            Application.account_ref == account_ref,
-            Application.status == ApplicationStatus.SENT,
-            func.date(Application.created_at) == func.current_date(),
-        )
+        select(func.count(Application.id)).where(*conds)
     )).scalar() or 0
 
 
@@ -163,23 +166,24 @@ async def run_user_cycle(user_id: int) -> int:
         user = await session.get(User, user_id)
         if not user or not user.is_active:
             return 0
-        st = user.get_settings()
-        # Задачи из активных SearchTask (ключ + своё резюме).
-        # Fallback — старые ключевые фразы без привязки резюме.
+        st_global = user.get_settings()
+        # Задачи из активных SearchTask (ключ + своё резюме + свои настройки).
+        # Fallback — старые ключевые фразы на общих настройках пользователя.
         from app.services.search_tasks import ensure_seeded, active_tasks
         await ensure_seeded(session, user)
         task_objs = await active_tasks(session, user.id)
         if task_objs:
             tasks = [{"keyword": t.keyword, "resume_id": t.resume_id,
-                      "resume_text": t.resume_text} for t in task_objs]
+                      "resume_text": t.resume_text, "task_id": t.id,
+                      "settings": (t.get_settings() if t.settings_json else st_global)}
+                     for t in task_objs]
         else:
-            tasks = [{"keyword": p, "resume_id": None, "resume_text": None}
-                     for p in st.search_phrases()]
+            tasks = [{"keyword": p, "resume_id": None, "resume_text": None,
+                      "task_id": None, "settings": st_global}
+                     for p in st_global.search_phrases()]
         # Без ключевых слов hh вернёт всё подряд — не откликаемся во избежание спама.
         if not tasks:
             log.info("user_no_keywords_skip", user_id=user.id)
-            return 0
-        if not _within_window(st.apply_hour_start, st.apply_hour_end):
             return 0
         contexts = await _account_contexts(session, user)
 
@@ -187,47 +191,49 @@ async def run_user_cycle(user_id: int) -> int:
     for ctx in contexts:
         ctx["user_id"] = user_id
         try:
-            total += await run_account_cycle(user_id, st, ctx, tasks)
+            total += await run_account_cycle(user_id, ctx, tasks)
         except Exception as e:
             log.error("account_cycle_error", user_id=user_id, ref=ctx["ref"], error=str(e))
     log.info("user_cycle_done", user_id=user_id, applied=total, accounts=len(contexts))
     return total
 
 
-async def run_account_cycle(user_id: int, st, ctx: dict, tasks: list[dict]) -> int:
-    """Один цикл автоотклика для одного hh-аккаунта (свой дедуп и лимит).
+async def run_account_cycle(user_id: int, ctx: dict, tasks: list[dict]) -> int:
+    """Один цикл автоотклика для одного hh-аккаунта.
 
-    tasks — список задач {keyword, resume_id, resume_text}. Каждая задача
-    ищет по своему ключу и откликается своим резюме (fallback — резюме аккаунта).
+    Каждая задача (tasks[i]) идёт со своими настройками (settings), ключом,
+    резюме и дневным лимитом — свой поиск, свой отбор, своё окно расписания.
     """
     ref = ctx["ref"]
     account_resume_id = ctx["resume_id"]
     account_resume_text = ctx["resume_text"]
-    applied = 0
-    async with async_session() as session:
-        remaining = st.daily_limit - await _sent_today(session, user_id, ref)
-    if remaining <= 0:
-        return 0
+    total_applied = 0
 
     client = HHUserClient(
         access_token=ctx["access_token"], refresh_token=ctx["refresh_token"],
         resume_id=ctx["resume_id"], expires_at=ctx["expires_at"],
     )
-    base_params = st.to_hh_params()
-    tasks = tasks or [{"keyword": "", "resume_id": None, "resume_text": None}]
-    excluded = st.excluded_words()
-    scored = 0
-    seen = 0
-    stop = False
-    # Ищем по каждой задаче отдельным запросом (hh не понимает OR), с пагинацией
-    # вглубь — топ быстро исчерпывается уже отработанным. Резюме — своё на задачу.
+    scored = 0  # бюджет ИИ-оценок на аккаунт (общий на все задачи)
+
     for task in tasks:
-        if stop or applied >= remaining:
-            break
+        st = task["settings"]
+        task_id = task.get("task_id")
+        # Окно расписания — своё у задачи.
+        if not _within_window(st.apply_hour_start, st.apply_hour_end):
+            continue
+        async with async_session() as session:
+            remaining = st.daily_limit - await _sent_today(session, user_id, ref, task_id)
+        if remaining <= 0:
+            continue
         phrase = task.get("keyword") or ""
         resume_id = task.get("resume_id") or account_resume_id
         resume_text = task.get("resume_text") or account_resume_text
         client.resume_id = resume_id  # переключаем резюме под задачу
+        base_params = st.to_hh_params()
+        excluded = st.excluded_words()
+        applied = 0
+        seen = 0
+        stop = False
         for page in range(MAX_SEARCH_PAGES):
             if applied >= remaining:
                 break
@@ -271,6 +277,7 @@ async def run_account_cycle(user_id: int, st, ctx: dict, tasks: list[dict]) -> i
                         vac = Vacancy(
                             user_id=user_id, platform="hh", external_id=vid, account_ref=ref,
                             url=url, title=title, status=VacancyStatus.NEW,
+                            search_task_id=task_id,
                         )
                         session.add(vac)
                         await session.commit()
@@ -339,7 +346,7 @@ async def run_account_cycle(user_id: int, st, ctx: dict, tasks: list[dict]) -> i
                     if not already:
                         session.add(Application(
                             user_id=user_id, vacancy_id=vac_id, platform="hh",
-                            cover_letter=letter, account_ref=ref,
+                            cover_letter=letter, account_ref=ref, search_task_id=task_id,
                             status=ApplicationStatus.SENT if success else ApplicationStatus.FAILED,
                             attempt_count=1,
                         ))
@@ -355,6 +362,11 @@ async def run_account_cycle(user_id: int, st, ctx: dict, tasks: list[dict]) -> i
                 await random_delay(st.apply_delay_min, st.apply_delay_max)
             if stop:
                 break
+        log.info("account_task_done", user_id=user_id, ref=ref, task_id=task_id,
+                 phrase=phrase, applied=applied, seen=seen)
+        total_applied += applied
+        if scored >= MAX_SCORINGS_PER_CYCLE:
+            break  # бюджет ИИ на аккаунт исчерпан — дальше задачи не крутим
 
-    log.info("account_cycle_done", user_id=user_id, ref=ref, applied=applied, seen=seen)
-    return applied
+    log.info("account_cycle_done", user_id=user_id, ref=ref, applied=total_applied)
+    return total_applied

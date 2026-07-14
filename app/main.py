@@ -38,12 +38,14 @@ async def init_db():
                     "tg_userbot_active": "BOOLEAN DEFAULT 0",
                 "hh_cookies": "TEXT",
                 },
-                "vacancies": {"account_ref": "VARCHAR(32)", "skip_reason": "VARCHAR(20)"},
-                "applications": {"account_ref": "VARCHAR(32)"},
+                "vacancies": {"account_ref": "VARCHAR(32)", "skip_reason": "VARCHAR(20)",
+                              "search_task_id": "INTEGER"},
+                "applications": {"account_ref": "VARCHAR(32)", "search_task_id": "INTEGER"},
                 "search_tasks": {
                     "resume_id": "VARCHAR(64)",
                     "resume_title": "VARCHAR(255)",
                     "resume_text": "TEXT",
+                    "settings_json": "TEXT",
                 },
             }
             for table, add in migrations.items():

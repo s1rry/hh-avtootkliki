@@ -62,7 +62,7 @@ def _limit_cap(user) -> int:
 
 LETTER_MODES = {"always": "всегда", "required": "только где требуется", "off": "без писем"}
 
-BTN_TASK = "📋 Задача"
+BTN_TASK = "📋 Задачи"
 BTN_STATS = "📊 Статистика"
 BTN_SETTINGS = "⚙️ Настройки"
 BTN_SUPPORT = "🆘 Поддержка"
@@ -165,39 +165,170 @@ def _task_resume_line(t) -> str:
     return f" · 📄 {t.resume_title[:24]}" if getattr(t, "resume_title", None) else ""
 
 
-async def _tasks_view(cb: CallbackQuery):
+async def _res(session, cb_or_msg, state):
+    """Куда пишем настройки: (holder, user, settings).
+
+    Если в FSM выбрана задача (edit_task_id) — редактируем её настройки
+    (при первом входе засеваем из общих). Иначе — общие настройки пользователя.
+    SearchTask и User имеют одинаковые get_settings()/set_settings().
+    """
+    from app.models.search_task import SearchTask
+    user = await _load(session, cb_or_msg)
+    tid = (await state.get_data()).get("edit_task_id") if state else None
+    holder = user
+    if tid:
+        t = await session.get(SearchTask, tid)
+        if t and t.user_id == user.id:
+            if not t.settings_json:  # первый вход в задачу — берём общие как основу
+                t.set_settings(user.get_settings())
+            holder = t
+    return holder, user, holder.get_settings()
+
+
+async def _task_stats_line(session, user_id: int, task_id: int) -> str:
+    """Компактная статистика по одной задаче для шапки карточки."""
+    async def c(*conds):
+        return (await session.execute(
+            select(func.count(Vacancy.id)).where(Vacancy.search_task_id == task_id, *conds)
+        )).scalar() or 0
+    processed = await c()
+    sent = (await session.execute(
+        select(func.count(Application.id)).where(
+            Application.search_task_id == task_id,
+            Application.status == ApplicationStatus.SENT)
+    )).scalar() or 0
+    ai_low = await c(Vacancy.skip_reason == "ai_low")
+    return (f"📊 Обработано: <b>{processed}</b> · отправлено: <b>{sent}</b> · "
+            f"фильтр ИИ: <b>{ai_low}</b>")
+
+
+def _task_kb(t, s: UserSettings) -> InlineKeyboardMarkup:
+    b = InlineKeyboardButton
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [b(text=("⏸ Задача активна" if t.is_active else "▶️ Задача выключена"),
+           callback_data=f"task:atgl:{t.id}")],
+        [b(text=f"📄 Резюме: {(t.resume_title or 'аккаунта')[:26]}",
+           callback_data=f"task:res:{t.id}")],
+        [b(text=f"🎯 Умный отбор (ИИ): {('от ' + str(s.ai_score_min) + '%') if s.ai_score_enabled else 'выкл'}",
+           callback_data="task:score")],
+        [b(text="📍 Регион", callback_data="task:input:areas"),
+         b(text="💰 Зарплата", callback_data="task:input:salary_min")],
+        [b(text="💻 Формат", callback_data="task:sub:fmt"),
+         b(text="📈 Опыт", callback_data="task:sub:exp")],
+        [b(text="🕒 Занятость", callback_data="task:sub:emp"),
+         b(text="🚫 Исключения", callback_data="task:input:excluded_text")],
+        [b(text="📊 Лимит/день", callback_data="task:input:daily_limit"),
+         b(text="⏰ Расписание", callback_data="task:input:window")],
+        [b(text="✉️ Письма", callback_data="task:letters"),
+         b(text=f"📈 Поднятие: {'вкл' if s.resume_bump else 'выкл'}", callback_data="task:toggle_bump")],
+        [b(text="🗑 Удалить задачу", callback_data=f"task:del:{t.id}")],
+        [b(text="⬅️ К списку задач", callback_data="task:list")],
+    ])
+
+
+async def _show_task_settings(target, session, t, edit=False):
+    """Карточка задачи: статистика по ней + её настройки поиска."""
+    s = t.get_settings() if t.settings_json else UserSettings()
+    stats = await _task_stats_line(session, t.user_id, t.id)
+    text = (
+        f"{'🟢' if t.is_active else '⚪️'} <b>{t.keyword}</b>\n"
+        f"{stats}\n\n" + _summary(s, t.keyword)
+    )
+    kb = _task_kb(t, s)
+    if edit and isinstance(target, CallbackQuery):
+        await target.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    else:
+        msg = target.message if isinstance(target, CallbackQuery) else target
+        await msg.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
+async def _render_home(target, state: FSMContext, edit=False):
+    """Домашний экран задач: карточка выбранной задачи, либо список задач."""
+    from app.models.search_task import SearchTask
+    tid = (await state.get_data()).get("edit_task_id") if state else None
+    async with async_session() as session:
+        if tid:
+            t = await session.get(SearchTask, tid)
+            if t:
+                await _show_task_settings(target, session, t, edit=edit)
+                return
+    # задача не выбрана — показать список
+    if isinstance(target, CallbackQuery):
+        await _tasks_view(target)
+    else:
+        await _tasks_view_msg(target)
+
+
+async def _tasks_kb_and_text(cb_or_msg):
     from app.services.search_tasks import list_tasks, ensure_seeded
     b = InlineKeyboardButton
     async with async_session() as session:
-        user = await _load(session, cb)
+        user = await _load(session, cb_or_msg)
         await ensure_seeded(session, user)
         tasks = await list_tasks(session, user.id)
-    rows = []
+        is_active = user.is_active
+    rows = [[b(text=("⏸ Остановить автоотклик" if is_active else "▶️ Запустить автоотклик"),
+              callback_data="task:toggle_active")]]
     for t in tasks:
         mark = "🟢" if t.is_active else "⚪️"
-        rows.append([b(text=f"{mark} {t.keyword[:28]}{_task_resume_line(t)}", callback_data=f"task:tgl:{t.id}"),
+        rows.append([b(text=f"{mark} {t.keyword[:26]}{_task_resume_line(t)}", callback_data=f"task:open:{t.id}"),
                      b(text="🗑", callback_data=f"task:del:{t.id}")])
     rows.append([b(text="➕ Новая задача", callback_data="task:newtask")])
-    rows.append([b(text="⬅️ Назад", callback_data="task:menu")])
     text = (
-        "📋 <b>Все задачи</b>\n\n"
-        "Каждая задача — одно название вакансии; ищем строго по нему. "
+        "📋 <b>Задачи</b>\n\n"
+        "Каждая задача — своё название вакансии, своё резюме и свои настройки поиска. "
         "Автоотклик идёт по всем 🟢 активным.\n"
-        "Тап по задаче — вкл/выкл, 🗑 — удалить."
+        "Тап по задаче — открыть её настройки и статистику; 🗑 — удалить."
     ) if tasks else (
         "📋 <b>Задачи</b>\n\nПока пусто. Добавь первую — «➕ Новая задача»."
     )
-    await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="HTML")
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _tasks_view(cb: CallbackQuery):
+    text, kb = await _tasks_kb_and_text(cb)
+    await cb.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+async def _tasks_view_msg(message: Message):
+    text, kb = await _tasks_kb_and_text(message)
+    await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
 @router.callback_query(F.data == "task:tasks")
-async def cb_tasks(cb: CallbackQuery, **kw):
+async def cb_tasks(cb: CallbackQuery, state: FSMContext, **kw):
+    await state.update_data(edit_task_id=None)
     await _tasks_view(cb)
     await cb.answer()
 
 
-@router.callback_query(F.data.startswith("task:tgl:"))
-async def cb_task_toggle(cb: CallbackQuery, **kw):
+@router.callback_query(F.data == "task:list")
+async def cb_task_list(cb: CallbackQuery, state: FSMContext, **kw):
+    await state.update_data(edit_task_id=None)
+    await _tasks_view(cb)
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("task:open:"))
+async def cb_task_open(cb: CallbackQuery, state: FSMContext, **kw):
+    from app.models.search_task import SearchTask
+    tid = int(cb.data.split(":")[2])
+    async with async_session() as session:
+        user = await _load(session, cb)
+        t = await session.get(SearchTask, tid)
+        if not t or t.user_id != user.id:
+            await cb.answer("Задача не найдена", show_alert=True)
+            return
+        if not t.settings_json:  # старая задача без своих настроек — засеять из общих
+            t.set_settings(user.get_settings())
+            await session.commit()
+        await state.update_data(edit_task_id=tid)
+        await _show_task_settings(cb, session, t, edit=True)
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("task:atgl:"))
+async def cb_task_active_toggle(cb: CallbackQuery, state: FSMContext, **kw):
     from app.models.search_task import SearchTask
     tid = int(cb.data.split(":")[2])
     async with async_session() as session:
@@ -206,12 +337,59 @@ async def cb_task_toggle(cb: CallbackQuery, **kw):
         if t and t.user_id == user.id:
             t.is_active = not t.is_active
             await session.commit()
-    await _tasks_view(cb)
+            await _show_task_settings(cb, session, t, edit=True)
     await cb.answer()
 
 
+@router.callback_query(F.data.startswith("task:res:"))
+async def cb_task_resume(cb: CallbackQuery, state: FSMContext, **kw):
+    from app.parsers.hh_resume import list_resumes
+    tid = int(cb.data.split(":")[2])
+    await cb.answer("Загружаю резюме...")
+    async with async_session() as session:
+        user = await _load(session, cb)
+        token = user.hh_access_token
+    if not token:
+        await cb.message.answer("Сначала подключи hh: /connect")
+        return
+    resumes = await list_resumes(token)
+    if not resumes:
+        await cb.message.answer("Не удалось получить список резюме.")
+        return
+    b = InlineKeyboardButton
+    rows = [[b(text=f"📄 {r['title'][:48]}", callback_data=f"task:setres:{tid}:{r['id']}")]
+            for r in resumes[:20]]
+    rows.append([b(text="⬅️ Назад", callback_data=f"task:open:{tid}")])
+    await cb.message.edit_text("📄 <b>Выбери резюме для этой задачи</b>",
+                               reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("task:setres:"))
+async def cb_task_setres(cb: CallbackQuery, state: FSMContext, **kw):
+    from app.parsers.hh_resume import fetch_resume_by_id
+    from app.models.search_task import SearchTask
+    _, _, tid_s, rid = cb.data.split(":", 3)
+    tid = int(tid_s)
+    async with async_session() as session:
+        user = await _load(session, cb)
+        token = user.hh_access_token
+    rid2, text, title = await fetch_resume_by_id(token, rid)
+    if not rid2:
+        await cb.answer("Не удалось загрузить резюме", show_alert=True)
+        return
+    async with async_session() as session:
+        user = await _load(session, cb)
+        t = await session.get(SearchTask, tid)
+        if t and t.user_id == user.id:
+            t.resume_id, t.resume_title, t.resume_text = rid2, title, text
+            await session.commit()
+            await state.update_data(edit_task_id=tid)
+            await _show_task_settings(cb, session, t, edit=True)
+    await cb.answer("Резюме обновлено")
+
+
 @router.callback_query(F.data.startswith("task:del:"))
-async def cb_task_del(cb: CallbackQuery, **kw):
+async def cb_task_del(cb: CallbackQuery, state: FSMContext, **kw):
     from app.models.search_task import SearchTask
     tid = int(cb.data.split(":")[2])
     async with async_session() as session:
@@ -220,6 +398,7 @@ async def cb_task_del(cb: CallbackQuery, **kw):
         if t and t.user_id == user.id:
             await session.delete(t)
             await session.commit()
+    await state.update_data(edit_task_id=None)
     await _tasks_view(cb)
     await cb.answer("Удалено")
 
@@ -291,16 +470,20 @@ async def on_newtask(message: Message, state: FSMContext, **kw):
         return
     async with async_session() as session:
         user = await _load(session, message)
-        session.add(SearchTask(
+        t = SearchTask(
             user_id=user.id, keyword=kw_text, is_active=True,
             resume_id=data.get("resume_id"), resume_title=data.get("resume_title"),
             resume_text=data.get("resume_text"),
-        ))
+        )
+        t.set_settings(user.get_settings())  # засеваем настройки задачи из общих
+        session.add(t)
         await session.commit()
-        s, active = user.get_settings(), user.is_active
-    res_line = f"\n📄 Резюме: <b>{data.get('resume_title')}</b>" if data.get("resume_title") else ""
-    await message.answer(f"✅ Задача добавлена: <b>{kw_text}</b>{res_line}", parse_mode="HTML")
-    await _show_main(message, s, active)
+        await session.refresh(t)
+        tid = t.id
+        res_line = f"\n📄 Резюме: <b>{data.get('resume_title')}</b>" if data.get("resume_title") else ""
+        await message.answer(f"✅ Задача добавлена: <b>{kw_text}</b>{res_line}", parse_mode="HTML")
+        await state.update_data(edit_task_id=tid)
+        await _show_task_settings(message, session, t)
 
 
 WHATS_NEW = (
@@ -442,7 +625,8 @@ async def btn_stats(message: Message, **kw):
 
 
 @router.message(F.text == BTN_SETTINGS)
-async def btn_settings(message: Message, **kw):
+async def btn_settings(message: Message, state: FSMContext, **kw):
+    await state.update_data(edit_task_id=None)  # аккаунт-настройки, не задача
     async with async_session() as session:
         user = await _load(session, message)
         if not user.hh_connected:
@@ -763,33 +947,30 @@ async def cmd_task(message: Message, state: FSMContext, **kw):
         if not user.hh_connected:
             await message.answer("Сначала подключи hh.ru: /connect")
             return
-        await _show_main(message, user.get_settings(), user.is_active)
+    await _tasks_view_msg(message)
 
 
 @router.callback_query(F.data == "task:menu")
 async def cb_menu(cb: CallbackQuery, state: FSMContext, **kw):
-    await state.clear()
-    async with async_session() as session:
-        user = await _load(session, cb)
-        await _show_main(cb, user.get_settings(), user.is_active, edit=True)
+    await _render_home(cb, state, edit=True)
     await cb.answer()
 
 
 @router.callback_query(F.data == "task:toggle_active")
-async def cb_toggle_active(cb: CallbackQuery, **kw):
+async def cb_toggle_active(cb: CallbackQuery, state: FSMContext, **kw):
+    from app.services.search_tasks import active_keywords
     async with async_session() as session:
         user = await _load(session, cb)
         if not user.hh_connected:
             await cb.answer("Сначала подключи hh: /connect", show_alert=True)
             return
-        if not user.is_active and not (user.get_settings().search_text or "").strip():
-            await cb.answer("Сначала укажи «Ключевые слова», иначе бот откликнется на всё подряд.", show_alert=True)
+        if not user.is_active and not await active_keywords(session, user.id):
+            await cb.answer("Сначала добавь хотя бы одну задачу — ➕ Новая задача.", show_alert=True)
             return
         user.is_active = not user.is_active
         await session.commit()
         state_on = user.is_active
-        s = user.get_settings()
-    await _show_main(cb, s, state_on, edit=True)
+    await _tasks_view(cb)
     await cb.answer("Автоотклик запущен" if state_on else "Автоотклик остановлен")
 
 
@@ -828,22 +1009,20 @@ async def _show_letters(cb: CallbackQuery, s: UserSettings):
 
 
 @router.callback_query(F.data == "task:letters")
-async def cb_letters(cb: CallbackQuery, **kw):
+async def cb_letters(cb: CallbackQuery, state: FSMContext, **kw):
     async with async_session() as session:
-        user = await _load(session, cb)
-        s = user.get_settings()
+        _, _, s = await _res(session, cb, state)
     await _show_letters(cb, s)
     await cb.answer()
 
 
 @router.callback_query(F.data.startswith("task:lmode:"))
-async def cb_lmode(cb: CallbackQuery, **kw):
+async def cb_lmode(cb: CallbackQuery, state: FSMContext, **kw):
     mode = cb.data.split(":")[2]
     async with async_session() as session:
-        user = await _load(session, cb)
-        s = user.get_settings()
+        holder, _, s = await _res(session, cb, state)
         s.letter_mode = mode
-        user.set_settings(s)
+        holder.set_settings(s)
         await session.commit()
     await cb.message.edit_reply_markup(reply_markup=_letters_kb(s))
     await cb.answer(LETTER_MODES.get(mode, mode))
@@ -879,25 +1058,27 @@ async def _show_score(cb: CallbackQuery, s: UserSettings):
 
 
 @router.callback_query(F.data == "task:toggle_desc")
-async def cb_toggle_desc(cb: CallbackQuery, **kw):
+async def cb_toggle_desc(cb: CallbackQuery, state: FSMContext, **kw):
     async with async_session() as session:
-        user = await _load(session, cb)
-        s = user.get_settings()
+        holder, _, s = await _res(session, cb, state)
         s.search_in_description = not s.search_in_description
-        user.set_settings(s)
+        holder.set_settings(s)
         await session.commit()
     await cb.message.edit_reply_markup(reply_markup=_score_kb(s))
     await cb.answer("Поиск в описании включён" if s.search_in_description else "Только по названию")
 
 
 @router.callback_query(F.data == "task:reconsider")
-async def cb_reconsider(cb: CallbackQuery, **kw):
+async def cb_reconsider(cb: CallbackQuery, state: FSMContext, **kw):
     from sqlalchemy import update
+    tid = (await state.get_data()).get("edit_task_id")
     async with async_session() as session:
         user = await _load(session, cb)
+        conds = [Vacancy.user_id == user.id, Vacancy.status == VacancyStatus.REJECTED]
+        if tid:  # редактируем конкретную задачу — вернуть только её отсев
+            conds.append(Vacancy.search_task_id == tid)
         res = await session.execute(
-            update(Vacancy)
-            .where(Vacancy.user_id == user.id, Vacancy.status == VacancyStatus.REJECTED)
+            update(Vacancy).where(*conds)
             .values(status=VacancyStatus.NEW, ai_score=None, ai_reason=None, skip_reason=None)
         )
         await session.commit()
@@ -906,46 +1087,41 @@ async def cb_reconsider(cb: CallbackQuery, **kw):
 
 
 @router.callback_query(F.data == "task:score")
-async def cb_score(cb: CallbackQuery, **kw):
+async def cb_score(cb: CallbackQuery, state: FSMContext, **kw):
     async with async_session() as session:
-        user = await _load(session, cb)
-        s = user.get_settings()
+        _, _, s = await _res(session, cb, state)
     await _show_score(cb, s)
     await cb.answer()
 
 
 @router.callback_query(F.data == "task:toggle_score")
-async def cb_toggle_score(cb: CallbackQuery, **kw):
+async def cb_toggle_score(cb: CallbackQuery, state: FSMContext, **kw):
     async with async_session() as session:
-        user = await _load(session, cb)
-        s = user.get_settings()
+        holder, _, s = await _res(session, cb, state)
         s.ai_score_enabled = not s.ai_score_enabled
-        user.set_settings(s)
+        holder.set_settings(s)
         await session.commit()
     await cb.message.edit_reply_markup(reply_markup=_score_kb(s))
     await cb.answer("Умный отбор включён" if s.ai_score_enabled else "Выключен")
 
 
 @router.callback_query(F.data == "task:toggle_bump")
-async def cb_toggle_bump(cb: CallbackQuery, **kw):
+async def cb_toggle_bump(cb: CallbackQuery, state: FSMContext, **kw):
     async with async_session() as session:
-        user = await _load(session, cb)
-        s = user.get_settings()
+        holder, _, s = await _res(session, cb, state)
         s.resume_bump = not s.resume_bump
-        user.set_settings(s)
+        holder.set_settings(s)
         await session.commit()
-        active = user.is_active
-    await _show_main(cb, s, active, edit=True)
+    await _render_home(cb, state, edit=True)
     await cb.answer("Поднятие резюме включено" if s.resume_bump else "Выключено")
 
 
 @router.callback_query(F.data == "task:toggle_ai")
-async def cb_toggle_ai(cb: CallbackQuery, **kw):
+async def cb_toggle_ai(cb: CallbackQuery, state: FSMContext, **kw):
     async with async_session() as session:
-        user = await _load(session, cb)
-        s = user.get_settings()
+        holder, _, s = await _res(session, cb, state)
         s.ai_enabled = not s.ai_enabled
-        user.set_settings(s)
+        holder.set_settings(s)
         await session.commit()
     await cb.message.edit_reply_markup(reply_markup=_letters_kb(s))
     await cb.answer("ИИ включён" if s.ai_enabled else "ИИ выключен")
@@ -963,12 +1139,12 @@ def _sub_kb(group: str, selected: list[str]) -> InlineKeyboardMarkup:
 
 
 @router.callback_query(F.data.startswith("task:sub:"))
-async def cb_sub(cb: CallbackQuery, **kw):
+async def cb_sub(cb: CallbackQuery, state: FSMContext, **kw):
     group = cb.data.split(":")[2]
     field, _ = GROUPS[group]
     async with async_session() as session:
-        user = await _load(session, cb)
-        selected = getattr(user.get_settings(), field)
+        _, _, s = await _res(session, cb, state)
+        selected = getattr(s, field)
     await cb.message.edit_text(
         "Отметь нужные варианты (можно несколько):",
         reply_markup=_sub_kb(group, selected),
@@ -977,19 +1153,18 @@ async def cb_sub(cb: CallbackQuery, **kw):
 
 
 @router.callback_query(F.data.startswith("task:tog:"))
-async def cb_tog(cb: CallbackQuery, **kw):
+async def cb_tog(cb: CallbackQuery, state: FSMContext, **kw):
     _, _, group, code = cb.data.split(":")
     field, _ = GROUPS[group]
     async with async_session() as session:
-        user = await _load(session, cb)
-        s = user.get_settings()
+        holder, _, s = await _res(session, cb, state)
         cur = list(getattr(s, field))
         if code in cur:
             cur.remove(code)
         else:
             cur.append(code)
         setattr(s, field, cur)
-        user.set_settings(s)
+        holder.set_settings(s)
         await session.commit()
         selected = cur
     await cb.message.edit_reply_markup(reply_markup=_sub_kb(group, selected))
@@ -1039,17 +1214,15 @@ async def cb_input(cb: CallbackQuery, state: FSMContext, **kw):
 @router.callback_query(F.data.startswith("task:clear:"))
 async def cb_clear(cb: CallbackQuery, state: FSMContext, **kw):
     field = cb.data.split(":")[2]
-    await state.clear()
     async with async_session() as session:
-        user = await _load(session, cb)
-        s = user.get_settings()
+        holder, user, s = await _res(session, cb, state)
         if hasattr(s, field):
             setattr(s, field, "")
-            user.set_settings(s)
+            holder.set_settings(s)
             await session.commit()
-        active, s2 = user.is_active, user.get_settings()
+    await state.set_state(None)  # выходим из ввода, задачу в state помним
     await cb.answer("Сброшено на стандартный")
-    await _show_main(cb, s2, active)
+    await _render_home(cb, state)
 
 
 @router.message(TaskInput.value)
@@ -1059,8 +1232,7 @@ async def on_value(message: Message, state: FSMContext, **kw):
     raw = (message.text or "").strip()
     err = None
     async with async_session() as session:
-        user = await _load(session, message)
-        s = user.get_settings()
+        holder, user, s = await _res(session, message, state)
         if field == "search_text":
             s.search_text = raw
         elif field == "ai_custom_prompt":
@@ -1118,14 +1290,12 @@ async def on_value(message: Message, state: FSMContext, **kw):
             except Exception:
                 err = "Формат: 9-21"
         if err is None or field in ("daily_limit", "areas"):
-            user.set_settings(s)
+            holder.set_settings(s)
             await session.commit()
-        active = user.is_active
-        s_final = user.get_settings()
-    await state.clear()
+    await state.set_state(None)  # выходим из ввода, задачу в state помним
     if err:
         await message.answer("⚠️ " + err)
-    await _show_main(message, s_final, active)
+    await _render_home(message, state)
 
 
 @router.callback_query(F.data == "task:tariff")

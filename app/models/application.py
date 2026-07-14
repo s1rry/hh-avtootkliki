@@ -33,3 +33,5 @@ class Application(Base, TimestampMixin):
     attempt_count: Mapped[int] = mapped_column(default=0)
     # Аккаунт-источник отклика (для дневного лимита на аккаунт). None — основной.
     account_ref: Mapped[str | None] = mapped_column(String(32), index=True)
+    # Задача (SearchTask), по которой отправлен отклик — для лимита и статистики.
+    search_task_id: Mapped[int | None] = mapped_column(index=True)

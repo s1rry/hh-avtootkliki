@@ -25,3 +25,19 @@ class SearchTask(Base, TimestampMixin):
     resume_id: Mapped[str | None] = mapped_column(String(64))
     resume_title: Mapped[str | None] = mapped_column(String(255))
     resume_text: Mapped[str | None] = mapped_column(Text)
+    # Свои настройки поиска задачи (регион/формат/опыт/лимит/ИИ/письма…) —
+    # UserSettings в JSON. None → используются общие настройки пользователя.
+    settings_json: Mapped[str | None] = mapped_column(Text)
+
+    def get_settings(self):
+        """Настройки этой задачи (UserSettings). Пустой JSON → дефолты."""
+        from app.models.user_settings import UserSettings
+        if self.settings_json:
+            try:
+                return UserSettings.model_validate_json(self.settings_json)
+            except Exception:
+                pass
+        return UserSettings()
+
+    def set_settings(self, s) -> None:
+        self.settings_json = s.model_dump_json()
