@@ -67,6 +67,8 @@ class HHUserClient:
         self.expires_at = expires_at or 0.0
         # Заполняется, если токен обновился — вызывающий сохранит в User.
         self.new_token: dict | None = None
+        # Сколько всего вакансий вернул последний search/similar (поле found).
+        self.last_found: int | None = None
 
     async def ensure_token(self) -> bool:
         """Обновить токен, если протух (или скоро протухнет). True — токен валиден."""
@@ -116,6 +118,7 @@ class HHUserClient:
             if r.status_code == 200:
                 data = r.json() or {}
                 items = data.get("items") or []
+                self.last_found = data.get("found")
                 log.info("user_search_ok", text=str(q.get("text"))[:80],
                          page=page, found=data.get("found"), items=len(items))
                 return items
@@ -142,6 +145,7 @@ class HHUserClient:
             if r.status_code == 200:
                 data = r.json() or {}
                 items = data.get("items") or []
+                self.last_found = data.get("found")
                 log.info("user_recommend_ok", resume=resume_id, page=page,
                          found=data.get("found"), items=len(items))
                 return items

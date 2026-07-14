@@ -28,6 +28,10 @@ class SearchTask(Base, TimestampMixin):
     # Свои настройки поиска задачи (регион/формат/опыт/лимит/ИИ/письма…) —
     # UserSettings в JSON. None → используются общие настройки пользователя.
     settings_json: Mapped[str | None] = mapped_column(Text)
+    # Кэш для карточки: сколько вакансий подобрал источник в последний цикл
+    # и когда был последний прогон.
+    rec_found: Mapped[int | None] = mapped_column()
+    last_run_at: Mapped[str | None] = mapped_column(String(32))
 
     def get_settings(self):
         """Настройки этой задачи (UserSettings). Пустой JSON → дефолты."""

@@ -384,6 +384,17 @@ async def run_account_cycle(user_id: int, ctx: dict, tasks: list[dict]) -> int:
                 break
         log.info("account_task_done", user_id=user_id, ref=ref, task_id=task_id,
                  phrase=phrase, applied=applied, seen=seen)
+        # Кэш для карточки задачи: сколько подобрал источник + время прогона.
+        if task_id:
+            from datetime import timezone
+            from app.models.search_task import SearchTask
+            async with async_session() as session:
+                t = await session.get(SearchTask, task_id)
+                if t:
+                    if client.last_found is not None:
+                        t.rec_found = int(client.last_found)
+                    t.last_run_at = datetime.now(timezone.utc).isoformat(timespec="minutes")
+                    await session.commit()
         total_applied += applied
         if scored >= MAX_SCORINGS_PER_CYCLE:
             break  # бюджет ИИ на аккаунт исчерпан — дальше задачи не крутим

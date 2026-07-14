@@ -46,6 +46,8 @@ async def init_db():
                     "resume_title": "VARCHAR(255)",
                     "resume_text": "TEXT",
                     "settings_json": "TEXT",
+                    "rec_found": "INTEGER",
+                    "last_run_at": "VARCHAR(32)",
                 },
             }
             for table, add in migrations.items():

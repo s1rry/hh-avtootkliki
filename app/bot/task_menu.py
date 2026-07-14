@@ -227,19 +227,14 @@ def _task_kb(t, s: UserSettings) -> InlineKeyboardMarkup:
          b(text="⏰ Расписание", callback_data="task:input:window")],
         [b(text="✉️ Письма", callback_data="task:letters"),
          b(text=f"📈 Поднятие: {'вкл' if s.resume_bump else 'выкл'}", callback_data="task:toggle_bump")],
-        [b(text="🗑 Удалить задачу", callback_data=f"task:del:{t.id}")],
-        [b(text="⬅️ К списку задач", callback_data="task:list")],
+        [b(text="⬅️ К задаче", callback_data=f"task:open:{t.id}")],
     ])
 
 
 async def _show_task_settings(target, session, t, edit=False):
-    """Карточка задачи: статистика по ней + её настройки поиска."""
+    """Экран настроек одной задачи (фильтры поиска)."""
     s = t.get_settings() if t.settings_json else UserSettings()
-    stats = await _task_stats_line(session, t.user_id, t.id)
-    text = (
-        f"{'🟢' if t.is_active else '⚪️'} <b>{t.keyword}</b>\n"
-        f"{stats}\n\n" + _summary(s, t.keyword)
-    )
+    text = f"⚙️ <b>Настройки задачи</b>\n🔎 {t.keyword}\n\n" + _summary(s, t.keyword)
     kb = _task_kb(t, s)
     if edit and isinstance(target, CallbackQuery):
         await target.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
@@ -248,8 +243,68 @@ async def _show_task_settings(target, session, t, edit=False):
         await msg.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
+async def _task_sent_counts(session, task_id: int) -> tuple[int, int]:
+    total = (await session.execute(
+        select(func.count(Application.id)).where(
+            Application.search_task_id == task_id,
+            Application.status == ApplicationStatus.SENT))).scalar() or 0
+    today = (await session.execute(
+        select(func.count(Application.id)).where(
+            Application.search_task_id == task_id,
+            Application.status == ApplicationStatus.SENT,
+            func.date(Application.created_at) == func.current_date()))).scalar() or 0
+    return today, total
+
+
+def _task_card_kb(t, tasks) -> InlineKeyboardMarkup:
+    b = InlineKeyboardButton
+    idx = next((i for i, x in enumerate(tasks) if x.id == t.id), 0)
+    total = len(tasks)
+    prev_id = tasks[idx - 1].id if idx > 0 else None
+    next_id = tasks[idx + 1].id if idx < total - 1 else None
+    nav = [b(text="◄", callback_data=(f"task:open:{prev_id}" if prev_id else "task:noop")),
+           b(text=f"{idx + 1} из {total}", callback_data="task:noop"),
+           b(text="►", callback_data=(f"task:open:{next_id}" if next_id else "task:noop"))]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        nav,
+        [b(text=("⏸ Остановить" if t.is_active else "▶️ Запустить"), callback_data=f"task:atgl:{t.id}"),
+         b(text="🗑 Удалить", callback_data=f"task:del:{t.id}")],
+        [b(text="⚙️ Настройки", callback_data=f"task:settings:{t.id}")],
+        [b(text="📊 Статистика", callback_data=f"task:tstat:{t.id}"),
+         b(text="⬅️ К списку", callback_data="task:list")],
+    ])
+
+
+async def _show_task_card(target, session, t, edit=False):
+    """Карточка задачи: статистика и часы видны сразу, без входа в настройки."""
+    from app.services.search_tasks import list_tasks
+    s = t.get_settings() if t.settings_json else UserSettings()
+    tasks = await list_tasks(session, t.user_id)
+    today, total = await _task_sent_counts(session, t.id)
+    idx = next((i for i, x in enumerate(tasks) if x.id == t.id), 0)
+    src = SOURCE_LABELS.get(getattr(s, "vacancy_source", "keyword"), "по ключу")
+    lines = [
+        f"{'🟢' if t.is_active else '🔴'} <b>{t.keyword}</b>\n",
+        f"📊 Откликов сегодня: <b>{today}</b> из {s.daily_limit} · всего: <b>{total}</b>",
+        f"🕒 Часы: <b>{s.apply_hour_start}:00–{s.apply_hour_end}:00 МСК</b>",
+        f"🧭 Источник: <b>{src}</b>",
+    ]
+    if getattr(t, "rec_found", None):
+        lines.append(f"🔎 Вакансий подобрано: <b>~{t.rec_found}</b>")
+    if getattr(t, "last_run_at", None):
+        lines.append(f"🕓 Последний прогон: <b>{t.last_run_at[:16].replace('T', ' ')} UTC</b>")
+    lines.append(f"\nЗадача {idx + 1} из {len(tasks)}")
+    kb = _task_card_kb(t, tasks)
+    txt = "\n".join(lines)
+    if edit and isinstance(target, CallbackQuery):
+        await target.message.edit_text(txt, reply_markup=kb, parse_mode="HTML")
+    else:
+        msg = target.message if isinstance(target, CallbackQuery) else target
+        await msg.answer(txt, reply_markup=kb, parse_mode="HTML")
+
+
 async def _render_home(target, state: FSMContext, edit=False):
-    """Домашний экран задач: карточка выбранной задачи, либо список задач."""
+    """Домашний экран задач: настройки выбранной задачи, либо список задач."""
     from app.models.search_task import SearchTask
     tid = (await state.get_data()).get("edit_task_id") if state else None
     async with async_session() as session:
@@ -329,7 +384,70 @@ async def cb_task_open(cb: CallbackQuery, state: FSMContext, **kw):
             t.set_settings(user.get_settings())
             await session.commit()
         await state.update_data(edit_task_id=tid)
+        await _show_task_card(cb, session, t, edit=True)
+    await cb.answer()
+
+
+@router.callback_query(F.data == "task:noop")
+async def cb_task_noop(cb: CallbackQuery, **kw):
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("task:settings:"))
+async def cb_task_settings(cb: CallbackQuery, state: FSMContext, **kw):
+    from app.models.search_task import SearchTask
+    tid = int(cb.data.split(":")[2])
+    async with async_session() as session:
+        user = await _load(session, cb)
+        t = await session.get(SearchTask, tid)
+        if not t or t.user_id != user.id:
+            await cb.answer("Задача не найдена", show_alert=True)
+            return
+        if not t.settings_json:
+            t.set_settings(user.get_settings())
+            await session.commit()
+        await state.update_data(edit_task_id=tid)
         await _show_task_settings(cb, session, t, edit=True)
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("task:tstat:"))
+async def cb_task_stat(cb: CallbackQuery, **kw):
+    from app.models.search_task import SearchTask
+    tid = int(cb.data.split(":")[2])
+    b = InlineKeyboardButton
+
+    async def cnt(session, *conds):
+        return (await session.execute(
+            select(func.count(Vacancy.id)).where(Vacancy.search_task_id == tid, *conds))).scalar() or 0
+
+    async with async_session() as session:
+        user = await _load(session, cb)
+        t = await session.get(SearchTask, tid)
+        if not t or t.user_id != user.id:
+            await cb.answer("Задача не найдена", show_alert=True)
+            return
+        processed = await cnt(session)
+        ai_low = await cnt(session, Vacancy.skip_reason == "ai_low")
+        already = await cnt(session, Vacancy.skip_reason == "already")
+        needs_test = await cnt(session, Vacancy.skip_reason == "needs_test")
+        today, total = await _task_sent_counts(session, tid)
+
+    def pct(n):
+        return round(n / processed * 100) if processed else 0
+
+    lines = [f"📊 <b>Статистика · {t.keyword}</b>\n",
+             f"Обработано вакансий: <b>{processed}</b>",
+             f"Отправлено сегодня: <b>{today}</b> · всего: <b>{total}</b>\n",
+             f"✅ Отправлено: <b>{total}</b> ({pct(total)}%)", _bar(pct(total))]
+    if ai_low:
+        lines += [f"🤖 Фильтр ИИ: <b>{ai_low}</b> ({pct(ai_low)}%)", _bar(pct(ai_low))]
+    if already:
+        lines += [f"🔁 Уже откликались: <b>{already}</b> ({pct(already)}%)", _bar(pct(already))]
+    if needs_test:
+        lines += [f"📝 Нужен тест: <b>{needs_test}</b> ({pct(needs_test)}%)", _bar(pct(needs_test))]
+    kb = InlineKeyboardMarkup(inline_keyboard=[[b(text="⬅️ К задаче", callback_data=f"task:open:{tid}")]])
+    await cb.message.edit_text("\n".join(lines), reply_markup=kb, parse_mode="HTML")
     await cb.answer()
 
 
