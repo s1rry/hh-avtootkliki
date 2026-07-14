@@ -19,8 +19,9 @@ STATE_FILE = Path("data/scheduler_state.json")
 
 
 class WorkerScheduler:
-    def __init__(self, notify_callback=None):
+    def __init__(self, notify_callback=None, bot=None):
         self.scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
+        self.bot = bot  # для персональных уведомлений (дайджест)
         # Load persisted state
         state = self._load_state()
         self.is_paused = state.get("is_paused", False)
@@ -129,6 +130,53 @@ class WorkerScheduler:
             except Exception as e:
                 log.warning("resume_bump_failed", user_id=uid, error=str(e))
 
+    async def _job_daily_digest(self):
+        """Вечерний дайджест (20:00 МСК): отправлено / приглашения / просмотры за день."""
+        from sqlalchemy import select, func
+        from app.database import async_session
+        from app.models.user import User
+        from app.models.search_task import SearchTask
+        from app.models.application import Application, ApplicationStatus
+        if not self.bot:
+            return
+        async with async_session() as session:
+            users = (await session.execute(
+                select(User).where(User.is_active.is_(True), User.hh_connected.is_(True))
+            )).scalars().all()
+            for u in users:
+                tasks = (await session.execute(
+                    select(SearchTask).where(SearchTask.user_id == u.id).order_by(SearchTask.id)
+                )).scalars().all()
+                if not tasks:
+                    continue
+                sent_sum = inv_sum = views_sum = 0
+                task_lines = []
+                for t in tasks:
+                    sent_today = (await session.execute(
+                        select(func.count(Application.id)).where(
+                            Application.search_task_id == t.id,
+                            Application.status == ApplicationStatus.SENT,
+                            func.date(Application.created_at) == func.current_date())
+                    )).scalar() or 0
+                    inv_t, vt = (t.invites_today or 0), (t.views_today or 0)
+                    sent_sum += sent_today
+                    inv_sum += inv_t
+                    views_sum += vt
+                    task_lines.append(f"• {t.keyword[:30]} — {sent_today} откл., {inv_t} пригл.")
+                if sent_sum == 0 and inv_sum == 0 and views_sum == 0:
+                    continue  # активности за день нет — не беспокоим
+                text = (
+                    "🌙 <b>Итоги дня</b>\n\n"
+                    f"📤 Отправлено откликов: <b>{sent_sum}</b>\n"
+                    f"📨 Приглашений: <b>{inv_sum}</b>\n"
+                    f"👀 Просмотров резюме: <b>{views_sum}</b>\n\n"
+                    "<b>По задачам:</b>\n" + "\n".join(task_lines)
+                )
+                try:
+                    await self.bot.send_message(u.telegram_id, text, parse_mode="HTML")
+                except Exception as e:
+                    log.warning("digest_send_failed", user_id=u.id, error=str(e))
+
     def _start_multi(self, interval: int):
         """Планировщик мультиюзерного режима: цикл откликов + поднятие резюме."""
         from datetime import datetime, timedelta
@@ -153,6 +201,18 @@ class WorkerScheduler:
             max_instances=1,
             misfire_grace_time=120,
             next_run_time=datetime.now(MSK) + timedelta(minutes=3),
+        )
+        # Вечерний дайджест — каждый день в 20:00 МСК.
+        self.scheduler.add_job(
+            self._job_daily_digest,
+            "cron",
+            hour=20,
+            minute=0,
+            id="daily_digest",
+            name="Дайджест дня",
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=3600,
         )
         self.scheduler.start()
         log.info("scheduler_started_multi", interval=interval)

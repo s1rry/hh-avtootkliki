@@ -177,7 +177,8 @@ async def main():
         log.info("playwright_not_available", mode="api_only")
 
     scheduler = WorkerScheduler(
-        notify_callback=lambda text: notify_telegram(bot, text)
+        notify_callback=lambda text: notify_telegram(bot, text),
+        bot=bot,
     )
     set_scheduler(scheduler)
     scheduler.start()
