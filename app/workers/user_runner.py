@@ -36,17 +36,29 @@ MAX_SCORINGS_PER_CYCLE = 40
 MAX_SEARCH_PAGES = 10
 
 
-async def _build_letter(item: dict, title: str, st, resume_text: str) -> str:
-    """Собрать письмо по настройкам режима:
+async def _build_letter(item: dict, title: str, st, resume_text: str,
+                        ab_index: int = 0) -> tuple[str, str | None]:
+    """Собрать письмо. Возвращает (текст, вариант A/B|None).
       off      — без письма ("")
       required — письмо только если вакансия его требует
-      always   — всегда; ИИ-персонализация при ai_enabled (иначе шаблон)."""
+      always   — всегда; ИИ-персонализация при ai_enabled (иначе шаблон).
+    Если включён A/B и заданы оба письма — по очереди шлём A/B как есть."""
     mode = getattr(st, "letter_mode", "always")
     if mode == "off":
-        return ""
+        return "", None
     if mode == "required" and not item.get("response_letter_required"):
-        return ""
+        return "", None
     contact = (getattr(st, "contact", "") or "").strip()
+    # A/B тест: чередуем письмо A и B (по чётности отправленных).
+    la = (getattr(st, "letter_a", "") or "").strip()
+    lb = (getattr(st, "letter_b", "") or "").strip()
+    if getattr(st, "ab_enabled", False) and la and lb:
+        variant = "A" if ab_index % 2 == 0 else "B"
+        text = render_letter(title, template=(la if variant == "A" else lb),
+                             contact=(contact or None))
+        if contact and contact not in text:
+            text += f"\n\nКонтакты: {contact}"
+        return text, variant
     if st.ai_enabled and resume_text:
         snip = item.get("snippet") or {}
         desc = " ".join(x for x in (snip.get("responsibility"), snip.get("requirement")) if x)
@@ -61,7 +73,7 @@ async def _build_letter(item: dict, title: str, st, resume_text: str) -> str:
             if text and len(text) >= 40 and not any(m in low for m in _REFUSAL):
                 if contact:
                     text += f"\n\nКонтакты: {contact}"
-                return text
+                return text, None
         except Exception as e:
             log.warning("ai_letter_failed", error=str(e))
     # Без ИИ: своё готовое письмо пользователя, иначе нейтральный шаблон.
@@ -69,7 +81,7 @@ async def _build_letter(item: dict, title: str, st, resume_text: str) -> str:
     text = render_letter(title, template=(custom or None), contact=(contact or None))
     if custom and contact and contact not in text:
         text += f"\n\nКонтакты: {contact}"
-    return text
+    return text, None
 
 
 def _within_window(start: int, end: int) -> bool:
@@ -191,6 +203,7 @@ async def _refresh_negotiations(user_id: int, ctx: dict) -> None:
 
     async with async_session() as session:
         vac_task: dict[str, int] = {}
+        vac_variant: dict[str, str] = {}
         if by_vac:
             rows = (await session.execute(
                 select(Vacancy.external_id, Vacancy.search_task_id).where(
@@ -200,15 +213,31 @@ async def _refresh_negotiations(user_id: int, ctx: dict) -> None:
             for ext, tid in rows:
                 if tid and ext not in vac_task:
                     vac_task[ext] = tid
+            # Вариант письма (A/B) для каждой вакансии — через Application.
+            vrows = (await session.execute(
+                select(Vacancy.external_id, Application.letter_variant)
+                .join(Application, Application.vacancy_id == Vacancy.id)
+                .where(Vacancy.user_id == user_id, Vacancy.platform == "hh",
+                       Vacancy.external_id.in_(list(by_vac.keys())),
+                       Application.letter_variant.is_not(None))
+            )).all()
+            for ext, var in vrows:
+                if var and ext not in vac_variant:
+                    vac_variant[ext] = var
         agg: dict[int, dict] = {}
         for vid, d in by_vac.items():
             tid = vac_task.get(vid)
             if not tid:
                 continue
-            a = agg.setdefault(tid, {"inv": 0, "inv_t": 0, "vw": 0, "vw_t": 0})
+            a = agg.setdefault(tid, {"inv": 0, "inv_t": 0, "vw": 0, "vw_t": 0, "ab_a": 0, "ab_b": 0})
             if d["invited"]:
                 a["inv"] += 1
                 a["inv_t"] += 1 if d["today"] else 0
+                var = vac_variant.get(vid)
+                if var == "A":
+                    a["ab_a"] += 1
+                elif var == "B":
+                    a["ab_b"] += 1
             if d["viewed"]:
                 a["vw"] += 1
                 a["vw_t"] += 1 if d["today"] else 0
@@ -220,6 +249,8 @@ async def _refresh_negotiations(user_id: int, ctx: dict) -> None:
             t.invites_today = a["inv_t"] if a else 0
             t.views = a["vw"] if a else 0
             t.views_today = a["vw_t"] if a else 0
+            t.ab_inv_a = a["ab_a"] if a else 0
+            t.ab_inv_b = a["ab_b"] if a else 0
         await session.commit()
 
 
@@ -402,7 +433,7 @@ async def run_account_cycle(user_id: int, ctx: dict, tasks: list[dict]) -> int:
                     else:
                         log.warning("user_score_none_apply_anyway", user_id=user_id, vid=vid)
 
-                letter = await _build_letter(item, title, st, resume_text)
+                letter, letter_variant = await _build_letter(item, title, st, resume_text, ab_index=applied)
                 try:
                     if item.get("has_test"):
                         # Вакансия с тестом: обычный API-отклик не пройдёт.
@@ -436,6 +467,7 @@ async def run_account_cycle(user_id: int, ctx: dict, tasks: list[dict]) -> int:
                         session.add(Application(
                             user_id=user_id, vacancy_id=vac_id, platform="hh",
                             cover_letter=letter, account_ref=ref, search_task_id=task_id,
+                            letter_variant=letter_variant,
                             status=ApplicationStatus.SENT if success else ApplicationStatus.FAILED,
                             attempt_count=1,
                         ))

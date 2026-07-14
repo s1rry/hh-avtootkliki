@@ -1150,8 +1150,96 @@ def _letters_kb(s: UserSettings) -> InlineKeyboardMarkup:
            callback_data="task:input:custom_letter")],
         [b(text=("📝 Промт для ИИ: задан" if s.ai_custom_prompt else "📝 Промт для ИИ: стандартный"),
            callback_data="task:input:ai_custom_prompt")],
+        [b(text=f"🅰️🅱️ A/B тест писем: {'вкл' if getattr(s, 'ab_enabled', False) else 'выкл'}",
+           callback_data="task:ab")],
         [b(text="⬅️ Назад", callback_data="task:menu")],
     ])
+
+
+def _ab_kb(s: UserSettings) -> InlineKeyboardMarkup:
+    b = InlineKeyboardButton
+    rows = [
+        [b(text=f"🅰️🅱️ A/B тест: {'🟢 вкл' if getattr(s, 'ab_enabled', False) else '⚪️ выкл'}",
+           callback_data="task:ab_toggle")],
+        [b(text=("✏️ Письмо A: задано" if s.letter_a else "✏️ Письмо A: нет"),
+           callback_data="task:input:letter_a")],
+        [b(text=("✏️ Письмо B: задано" if s.letter_b else "✏️ Письмо B: нет"),
+           callback_data="task:input:letter_b")],
+    ]
+    if s.letter_a and s.letter_b:
+        rows.append([b(text="🅰️ Оставить только A", callback_data="task:ab_keep:A"),
+                     b(text="🅱️ Оставить только B", callback_data="task:ab_keep:B")])
+    rows.append([b(text="⬅️ Назад", callback_data="task:letters")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _show_ab(cb: CallbackQuery, session, s: UserSettings, task_id: int | None):
+    async def sent(var):
+        if not task_id:
+            return 0
+        return (await session.execute(
+            select(func.count(Application.id)).where(
+                Application.search_task_id == task_id,
+                Application.letter_variant == var,
+                Application.status == ApplicationStatus.SENT))).scalar() or 0
+
+    sent_a, sent_b = await sent("A"), await sent("B")
+    inv_a = inv_b = 0
+    if task_id:
+        from app.models.search_task import SearchTask
+        t = await session.get(SearchTask, task_id)
+        if t:
+            inv_a, inv_b = (t.ab_inv_a or 0), (t.ab_inv_b or 0)
+
+    def rate(inv, sent_):
+        return f"{round(inv / sent_ * 100)}%" if sent_ else "—"
+
+    lead_a = sent_a and sent_b and (inv_a / max(sent_a, 1)) > (inv_b / max(sent_b, 1))
+    lead_b = sent_a and sent_b and (inv_b / max(sent_b, 1)) > (inv_a / max(sent_a, 1))
+    text = (
+        "🅰️🅱️ <b>A/B тест писем</b>\n\n"
+        "Бот по очереди шлёт письмо A и B и меряет, где больше приглашений. "
+        "Работает при выключенном ИИ (тексты уходят как есть). Нужны оба письма.\n\n"
+        f"🅰️ A · отправлено <b>{sent_a}</b> · приглашений <b>{inv_a}</b> ({rate(inv_a, sent_a)}){' 🏆' if lead_a else ''}\n"
+        f"🅱️ B · отправлено <b>{sent_b}</b> · приглашений <b>{inv_b}</b> ({rate(inv_b, sent_b)}){' 🏆' if lead_b else ''}\n\n"
+        f"Статус: <b>{'включён' if getattr(s, 'ab_enabled', False) else 'выключен'}</b>."
+    )
+    await cb.message.edit_text(text, reply_markup=_ab_kb(s), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "task:ab")
+async def cb_ab(cb: CallbackQuery, state: FSMContext, **kw):
+    async with async_session() as session:
+        _, _, s = await _res(session, cb, state)
+        tid = (await state.get_data()).get("edit_task_id")
+        await _show_ab(cb, session, s, tid)
+    await cb.answer()
+
+
+@router.callback_query(F.data == "task:ab_toggle")
+async def cb_ab_toggle(cb: CallbackQuery, state: FSMContext, **kw):
+    async with async_session() as session:
+        holder, _, s = await _res(session, cb, state)
+        s.ab_enabled = not getattr(s, "ab_enabled", False)
+        holder.set_settings(s)
+        await session.commit()
+        tid = (await state.get_data()).get("edit_task_id")
+        await _show_ab(cb, session, s, tid)
+    await cb.answer("A/B включён" if s.ab_enabled else "A/B выключен")
+
+
+@router.callback_query(F.data.startswith("task:ab_keep:"))
+async def cb_ab_keep(cb: CallbackQuery, state: FSMContext, **kw):
+    var = cb.data.split(":")[2]
+    async with async_session() as session:
+        holder, _, s = await _res(session, cb, state)
+        s.custom_letter = s.letter_a if var == "A" else s.letter_b
+        s.ab_enabled = False
+        s.ai_enabled = False  # своё письмо шлётся как есть
+        holder.set_settings(s)
+        await session.commit()
+    await cb.answer(f"Оставил вариант {var} как основное письмо", show_alert=True)
+    await _show_letters(cb, s)
 
 
 async def _show_letters(cb: CallbackQuery, s: UserSettings):
@@ -1361,10 +1449,15 @@ _PROMPTS = {
     "contact": "Пришли контакт для сопроводительных писем — его увидит HR вместо твоего личного ТГ "
                "(например второй ТГ-аккаунт <code>@my_work_tg</code>, почта или телефон). "
                "Пусто/<code>-</code> — убрать контакт.",
+    "letter_a": "Пришли текст письма <b>A</b> для A/B теста (шлётся как есть). "
+                "Можно <code>%(vacancy_suffix)s</code>. Пусто/<code>-</code> — убрать.",
+    "letter_b": "Пришли текст письма <b>B</b> для A/B теста (шлётся как есть). "
+                "Можно <code>%(vacancy_suffix)s</code>. Пусто/<code>-</code> — убрать.",
 }
 
 
-CLEARABLE_FIELDS = {"ai_custom_prompt", "custom_letter", "contact", "excluded_text"}
+CLEARABLE_FIELDS = {"ai_custom_prompt", "custom_letter", "contact", "excluded_text",
+                    "letter_a", "letter_b"}
 
 
 @router.callback_query(F.data.startswith("task:input:"))
@@ -1410,6 +1503,10 @@ async def on_value(message: Message, state: FSMContext, **kw):
             s.ai_custom_prompt = "" if raw in ("", "-") else raw
         elif field == "custom_letter":
             s.custom_letter = "" if raw in ("", "-") else raw
+        elif field == "letter_a":
+            s.letter_a = "" if raw in ("", "-") else raw
+        elif field == "letter_b":
+            s.letter_b = "" if raw in ("", "-") else raw
         elif field == "contact":
             s.contact = "" if raw in ("", "-") else raw
         elif field == "excluded_text":

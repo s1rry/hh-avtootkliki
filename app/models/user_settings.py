@@ -72,6 +72,10 @@ class UserSettings(BaseModel):
     ai_enabled: bool = False             # ИИ-персонализация писем
     ai_custom_prompt: str = ""           # свой промт для ИИ-писем (пусто = стандартный)
     custom_letter: str = ""              # своё готовое письмо (шлётся как есть, без ИИ)
+    # A/B тест писем: бот по очереди шлёт письмо A и B, меряет приглашения.
+    ab_enabled: bool = False
+    letter_a: str = ""
+    letter_b: str = ""
     # Умный отбор: ИИ оценивает вакансию по резюме (0–100) и отклик идёт
     # только на совпадения >= ai_score_min. Отсекает слабые вакансии.
     ai_score_enabled: bool = False

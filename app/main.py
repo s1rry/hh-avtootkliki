@@ -40,7 +40,8 @@ async def init_db():
                 },
                 "vacancies": {"account_ref": "VARCHAR(32)", "skip_reason": "VARCHAR(20)",
                               "search_task_id": "INTEGER"},
-                "applications": {"account_ref": "VARCHAR(32)", "search_task_id": "INTEGER"},
+                "applications": {"account_ref": "VARCHAR(32)", "search_task_id": "INTEGER",
+                                 "letter_variant": "VARCHAR(1)"},
                 "search_tasks": {
                     "resume_id": "VARCHAR(64)",
                     "resume_title": "VARCHAR(255)",
@@ -52,6 +53,8 @@ async def init_db():
                     "invites_today": "INTEGER",
                     "views": "INTEGER",
                     "views_today": "INTEGER",
+                    "ab_inv_a": "INTEGER",
+                    "ab_inv_b": "INTEGER",
                 },
             }
             for table, add in migrations.items():

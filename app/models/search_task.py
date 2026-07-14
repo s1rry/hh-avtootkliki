@@ -37,6 +37,9 @@ class SearchTask(Base, TimestampMixin):
     invites_today: Mapped[int | None] = mapped_column()
     views: Mapped[int | None] = mapped_column()
     views_today: Mapped[int | None] = mapped_column()
+    # A/B: приглашения по варианту письма (кэш из negotiations).
+    ab_inv_a: Mapped[int | None] = mapped_column()
+    ab_inv_b: Mapped[int | None] = mapped_column()
 
     def get_settings(self):
         """Настройки этой задачи (UserSettings). Пустой JSON → дефолты."""
