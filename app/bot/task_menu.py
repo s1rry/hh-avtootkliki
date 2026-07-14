@@ -272,7 +272,6 @@ def _task_card_kb(t, tasks) -> InlineKeyboardMarkup:
         [b(text="⚙️ Настройки", callback_data=f"task:settings:{t.id}")],
         [b(text="📊 По задаче", callback_data=f"task:tstat:{t.id}"),
          b(text="➕ Новая задача", callback_data="task:newtask")],
-        [b(text="⬅️ К списку задач", callback_data="task:list")],
     ])
 
 
@@ -364,10 +363,36 @@ async def cb_tasks(cb: CallbackQuery, state: FSMContext, **kw):
     await cb.answer()
 
 
+async def _open_first_card(target, state: FSMContext):
+    """«Задачи» ведёт сразу в карточку первой задачи (навигация ◄►), без списка.
+    Нет задач — предложить создать."""
+    from app.services.search_tasks import list_tasks, ensure_seeded
+    b = InlineKeyboardButton
+    async with async_session() as session:
+        user = await _load(session, target)
+        await ensure_seeded(session, user)
+        tasks = await list_tasks(session, user.id)
+        if not tasks:
+            await state.update_data(edit_task_id=None)
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [b(text="➕ Новая задача", callback_data="task:newtask")]])
+            text = "📋 <b>Задачи</b>\n\nПока пусто. Создай первую — она сразу начнёт откликаться."
+            if isinstance(target, CallbackQuery):
+                await target.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            else:
+                await target.answer(text, reply_markup=kb, parse_mode="HTML")
+            return
+        t = tasks[0]
+        if not t.settings_json:
+            t.set_settings(user.get_settings())
+            await session.commit()
+        await state.update_data(edit_task_id=t.id)
+        await _show_task_card(target, session, t, edit=isinstance(target, CallbackQuery))
+
+
 @router.callback_query(F.data == "task:list")
 async def cb_task_list(cb: CallbackQuery, state: FSMContext, **kw):
-    await state.update_data(edit_task_id=None)
-    await _tasks_view(cb)
+    await _open_first_card(cb, state)
     await cb.answer()
 
 
@@ -461,8 +486,10 @@ async def cb_task_active_toggle(cb: CallbackQuery, state: FSMContext, **kw):
         t = await session.get(SearchTask, tid)
         if t and t.user_id == user.id:
             t.is_active = not t.is_active
+            if t.is_active and not user.is_active:
+                user.is_active = True  # включили задачу — включаем автоотклик
             await session.commit()
-            await _show_task_settings(cb, session, t, edit=True)
+            await _show_task_card(cb, session, t, edit=True)
     await cb.answer()
 
 
@@ -524,7 +551,7 @@ async def cb_task_del(cb: CallbackQuery, state: FSMContext, **kw):
             await session.delete(t)
             await session.commit()
     await state.update_data(edit_task_id=None)
-    await _tasks_view(cb)
+    await _open_first_card(cb, state)
     await cb.answer("Удалено")
 
 
@@ -602,13 +629,15 @@ async def on_newtask(message: Message, state: FSMContext, **kw):
         )
         t.set_settings(user.get_settings())  # засеваем настройки задачи из общих
         session.add(t)
+        if not user.is_active:
+            user.is_active = True  # первая задача — включаем автоотклик
         await session.commit()
         await session.refresh(t)
         tid = t.id
         res_line = f"\n📄 Резюме: <b>{data.get('resume_title')}</b>" if data.get("resume_title") else ""
         await message.answer(f"✅ Задача добавлена: <b>{kw_text}</b>{res_line}", parse_mode="HTML")
         await state.update_data(edit_task_id=tid)
-        await _show_task_settings(message, session, t)
+        await _show_task_card(message, session, t)
 
 
 WHATS_NEW = (
@@ -1074,7 +1103,7 @@ async def cmd_task(message: Message, state: FSMContext, **kw):
         if not user.hh_connected:
             await message.answer("Сначала подключи hh.ru: /connect")
             return
-    await _tasks_view_msg(message)
+    await _open_first_card(message, state)
 
 
 @router.callback_query(F.data == "task:menu")

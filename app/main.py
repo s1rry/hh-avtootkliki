@@ -156,7 +156,10 @@ async def main():
             site = web.TCPSite(runner, "127.0.0.1", settings.payment_webhook_port)
             await site.start()
             log.info("payment_webhook_started", port=settings.payment_webhook_port)
-    dp.include_router(router)
+    else:
+        # Старый одиночный роутер (глобальные /stats, /vacancies, /messages…) —
+        # ТОЛЬКО в single-режиме. В multi он бы показывал данные всех пользователей.
+        dp.include_router(router)
 
     playwright_ok = HAS_PLAYWRIGHT
     if playwright_ok:
