@@ -313,8 +313,6 @@ async def run_account_cycle(user_id: int, ctx: dict, tasks: list[dict]) -> int:
         access_token=ctx["access_token"], refresh_token=ctx["refresh_token"],
         resume_id=ctx["resume_id"], expires_at=ctx["expires_at"],
     )
-    scored = 0  # бюджет ИИ-оценок на аккаунт (общий на все задачи)
-
     for task in tasks:
         st = task["settings"]
         task_id = task.get("task_id")
@@ -333,6 +331,7 @@ async def run_account_cycle(user_id: int, ctx: dict, tasks: list[dict]) -> int:
         excluded = st.excluded_words()
         applied = 0
         seen = 0
+        scored = 0  # бюджет ИИ-оценок — свой на каждую задачу (иначе 1-я съедает всё)
         stop = False
         # Источник вакансий: ключ задачи и/или лента рекомендаций hh под резюме.
         src_mode = getattr(st, "vacancy_source", "keyword")
@@ -497,8 +496,6 @@ async def run_account_cycle(user_id: int, ctx: dict, tasks: list[dict]) -> int:
                     t.last_run_at = datetime.now(timezone.utc).isoformat(timespec="minutes")
                     await session.commit()
         total_applied += applied
-        if scored >= MAX_SCORINGS_PER_CYCLE:
-            break  # бюджет ИИ на аккаунт исчерпан — дальше задачи не крутим
 
     log.info("account_cycle_done", user_id=user_id, ref=ref, applied=total_applied)
     return total_applied
