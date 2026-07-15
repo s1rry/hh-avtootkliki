@@ -75,4 +75,9 @@ class User(Base, TimestampMixin):
             return False
         if self.tier_until is None:
             return True
-        return self.tier_until > datetime.datetime.now(datetime.timezone.utc)
+        # SQLite отдаёт naive-дату даже для timezone=True — трактуем её как UTC,
+        # иначе сравнение с aware-now падает (offset-naive vs offset-aware).
+        tu = self.tier_until
+        if tu.tzinfo is None:
+            tu = tu.replace(tzinfo=datetime.timezone.utc)
+        return tu > datetime.datetime.now(datetime.timezone.utc)
