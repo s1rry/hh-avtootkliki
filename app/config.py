@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     ai_api_key: str = ""
     ai_base_url: str = "https://api.cerebras.ai/v1"
     ai_model: str = "gpt-oss-120b"
+    # Отдельная (дешёвая) модель для скоринга вакансий — он возвращает одно число,
+    # мощная модель тут не нужна. Пусто → используется ai_model.
+    ai_score_model: str = ""
     # Прокси для ИИ-запросов (если провайдер недоступен напрямую с RU-сервера).
     # Пусто = использовать tg_proxy (тот же SOCKS, что для Telegram), если он задан.
     ai_proxy: str = ""

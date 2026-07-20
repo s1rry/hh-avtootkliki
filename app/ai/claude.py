@@ -82,7 +82,8 @@ class ClaudeAI:
                 return text
         return ""
 
-    async def _call_openai_compatible(self, system: str, user_message: str, max_tokens: int) -> tuple[str, int, int]:
+    async def _call_openai_compatible(self, system: str, user_message: str, max_tokens: int,
+                                      model: str | None = None) -> tuple[str, int, int]:
         """Вызов любого OpenAI-совместимого эндпоинта (OpenRouter/Cerebras/Mistral/…)."""
         headers = {
             "Authorization": f"Bearer {settings.ai_api_key}",
@@ -92,7 +93,7 @@ class ClaudeAI:
                           "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
         }
         payload = {
-            "model": settings.ai_model,
+            "model": model or settings.ai_model,
             "max_tokens": max_tokens,
             "messages": [
                 {"role": "system", "content": system},
@@ -116,7 +117,7 @@ class ClaudeAI:
 
         # OpenAI-совместимый провайдер (по умолчанию для облака/self-host).
         if settings.ai_provider != "anthropic":
-            return await self._call_openai_compatible(system, user_message, max_tokens)
+            return await self._call_openai_compatible(system, user_message, max_tokens, model)
 
         # Permanent fallback: if primary was exhausted before, go straight to fallback.
         if self.use_fallback and self.fallback:
@@ -225,11 +226,15 @@ class ClaudeAI:
             "бизнес/системного аналитика вакансии химика-аналитика, "
             "бухгалтера-аналитика, лаборанта — НЕ подходят. Верни ТОЛЬКО число "
             "от 0 до 100 — процент соответствия. Без слов, без пояснений.\n\n"
-            f"Резюме кандидата:\n{resume[:4000]}"
+            # Вход урезан: платим в основном за входные токены, а для оценки
+            # достаточно должности + ключевых навыков, а не всего резюме.
+            f"Резюме кандидата:\n{resume[:1500]}"
         )
-        user_msg = f"Вакансия: {vacancy_title}\n\nОписание:\n{(vacancy_description or '')[:2500]}"
+        user_msg = f"Вакансия: {vacancy_title}\n\nОписание:\n{(vacancy_description or '')[:800]}"
         try:
-            text, _, _ = await self._call(system, user_msg, max_tokens=800)
+            # Скоринг возвращает одно число — гоняем его на дешёвой модели.
+            text, _, _ = await self._call(system, user_msg, max_tokens=800,
+                                          model=(settings.ai_score_model or None))
         except Exception as e:
             log.warning("ai_score_failed", error=str(e))
             return None
