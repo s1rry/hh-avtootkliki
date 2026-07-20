@@ -48,6 +48,7 @@ class ClaudeAI:
         # Пул бесплатных эндпоинтов для скоринга + указатель круговой ротации.
         self.score_pool = self._parse_score_pool(settings.ai_score_pool)
         self._pool_idx = 0
+        self._pool_alert_at = 0.0  # когда последний раз предупреждали админа
 
     @staticmethod
     def _parse_score_pool(raw: str) -> list[dict]:
@@ -237,6 +238,34 @@ class ClaudeAI:
             log.warning("ai_complete_failed", error=str(e))
             return ""
 
+    async def _alert_admin_pool_down(self, errors: list[str]) -> None:
+        """Все бесплатные ключи скоринга не отвечают — сказать владельцу.
+
+        Не чаще раза в час: скоринг вызывается тысячи раз, иначе завалим чат.
+        Бот при этом продолжает работать на платном провайдере — это
+        предупреждение о растущих расходах, а не об аварии.
+        """
+        import time as _t
+        if _t.time() - self._pool_alert_at < 3600:
+            return
+        self._pool_alert_at = _t.time()
+        token = settings.tg_bot_token
+        admin = str(settings.tg_admin_chat_id or "")
+        if not token or not admin:
+            return
+        # В сообщение идут только хосты — ключи не светим даже в своём чате.
+        text = ("🔑 <b>Бесплатные ключи скоринга не отвечают</b>\n\n"
+                + "\n".join(f"• {e}" for e in errors[:5])
+                + "\n\nСкоринг ушёл на платного провайдера — бот работает, "
+                  "но тратит деньги. Проверь лимиты или замени ключи "
+                  "в AI_SCORE_POOL.")
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                await c.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                             json={"chat_id": admin, "text": text, "parse_mode": "HTML"})
+        except Exception as e:
+            log.warning("pool_alert_failed", error=str(e))
+
     async def _score_call(self, system: str, user_msg: str) -> str | None:
         """Скоринг по пулу: каждый вызов начинает со следующего ключа.
 
@@ -257,6 +286,7 @@ class ClaudeAI:
                 errors.append(f"{ep['base_url']}: {type(e).__name__}")
         if errors:
             log.warning("ai_score_pool_exhausted", tried=errors)
+            await self._alert_admin_pool_down(errors)
         try:
             text, _, _ = await self._call(system, user_msg, max_tokens=800,
                                           model=(settings.ai_score_model or None))
