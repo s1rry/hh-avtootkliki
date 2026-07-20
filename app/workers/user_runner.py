@@ -311,36 +311,25 @@ async def run_user_cycle(user_id: int) -> int:
 
 
 async def _notify_ai_down(user_id: int) -> None:
-    """ИИ недоступен — предупреждаем пользователя и владельца бота.
+    """ИИ недоступен — сообщаем ТОЛЬКО владельцу бота.
 
-    Отклики уже остановлены (fail-closed): лучше не отправить ничего, чем
-    выжечь дневной лимит hh откликами без отбора.
+    Пользователя не дёргаем: пауза обычно короткая, а сообщение о сбое
+    тревожит сильнее, чем сама задержка. Отклики уже остановлены
+    (fail-closed) — лучше не отправить ничего, чем откликаться без отбора.
     """
     import httpx
     token = settings.tg_bot_token
-    if not token:
-        return
-    async with async_session() as session:
-        user = await session.get(User, user_id)
-    targets = []
-    if user and user.telegram_id:
-        targets.append((str(user.telegram_id),
-                        "⏸ <b>Отклики на паузе</b>\n\nИИ-отбор временно недоступен, "
-                        "поэтому бот остановился, чтобы не откликаться вслепую и не "
-                        "тратить дневной лимит hh на нерелевантные вакансии.\n\n"
-                        "Ничего делать не нужно — как только ИИ снова заработает, "
-                        "отклики продолжатся автоматически."))
     admin = str(settings.tg_admin_chat_id or "")
-    if admin and admin != str(getattr(user, "telegram_id", "")):
-        targets.append((admin, f"🔴 ИИ недоступен, отклики остановлены (user_id={user_id}). "
-                               f"Проверь баланс провайдера."))
-    for chat_id, text in targets:
-        try:
-            async with httpx.AsyncClient(timeout=15) as c:
-                await c.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                             json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
-        except Exception as e:
-            log.warning("ai_down_notify_failed", chat_id=chat_id, error=str(e))
+    if not token or not admin:
+        return
+    text = (f"🔴 ИИ недоступен, отклики остановлены (user_id={user_id}). "
+            f"Проверь баланс провайдера.")
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            await c.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                         json={"chat_id": admin, "text": text})
+    except Exception as e:
+        log.warning("ai_down_notify_failed", error=str(e))
 
 
 async def run_account_cycle(user_id: int, ctx: dict, tasks: list[dict]) -> int:
