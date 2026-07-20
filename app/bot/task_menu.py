@@ -1589,6 +1589,7 @@ async def cb_tariff(cb: CallbackQuery, **kw):
         f"• 1 аккаунт hh, до {FREE_DAILY_LIMIT} откликов/день\n"
         "• ИИ-письма и умный отбор\n\n"
         f"Расширенный ({settings.subscription_price}₽/мес):\n"
+        "• письма пишет модель посильнее — заметно живее и точнее\n"
         f"• до {PAID_DAILY_LIMIT} откликов/день — это в "
         f"{PAID_DAILY_LIMIT // FREE_DAILY_LIMIT} раз больше\n"
         f"• до {settings.max_hh_accounts} hh-аккаунтов сразу\n"

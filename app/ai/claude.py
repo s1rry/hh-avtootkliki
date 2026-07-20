@@ -187,7 +187,7 @@ class ClaudeAI:
                 "_output_tokens": out_tok,
             }
 
-    async def generate_cover_letter(self, vacancy_title: str, vacancy_description: str, company_name: str = "", resume: str | None = None, custom_prompt: str | None = None) -> tuple[str, int, int]:
+    async def generate_cover_letter(self, vacancy_title: str, vacancy_description: str, company_name: str = "", resume: str | None = None, custom_prompt: str | None = None, model: str | None = None) -> tuple[str, int, int]:
         resume_text = resume or settings.resume_text
         if custom_prompt:
             system = f"{custom_prompt}\n\nПрофиль кандидата:\n{resume_text}"
@@ -200,8 +200,8 @@ class ClaudeAI:
 Описание:
 {vacancy_description}"""
 
-        text, inp_tok, out_tok = await self._call(system, user_msg, max_tokens=512)
-        log.info("ai_cover_letter_generated", title=vacancy_title[:60])
+        text, inp_tok, out_tok = await self._call(system, user_msg, max_tokens=512, model=model)
+        log.info("ai_cover_letter_generated", title=vacancy_title[:60], model=model or "default")
         return text.strip(), inp_tok, out_tok
 
     async def complete(self, prompt: str, max_tokens: int = 300) -> str:

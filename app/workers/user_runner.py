@@ -47,7 +47,8 @@ MAX_SCORE_FAILS = 5
 
 
 async def _build_letter(item: dict, title: str, st, resume_text: str,
-                        ab_index: int = 0) -> tuple[str, str | None]:
+                        ab_index: int = 0,
+                        model: str | None = None) -> tuple[str, str | None]:
     """Собрать письмо. Возвращает (текст, вариант A/B|None).
       off      — без письма ("")
       required — письмо только если вакансия его требует
@@ -76,7 +77,7 @@ async def _build_letter(item: dict, title: str, st, resume_text: str,
         try:
             text, _, _ = await claude_ai.generate_cover_letter(
                 title, desc, company_name=company, resume=resume_text,
-                custom_prompt=(st.ai_custom_prompt or None)
+                custom_prompt=(st.ai_custom_prompt or None), model=model
             )
             text = (text or "").strip()
             low = text.lower()
@@ -290,10 +291,13 @@ async def run_user_cycle(user_id: int) -> int:
             log.info("user_no_keywords_skip", user_id=user.id)
             return 0
         contexts = await _account_contexts(session, user)
+        # Письма: платным — основная модель, бесплатным — подешевле.
+        letter_model = None if user.is_paid else (settings.ai_letter_model_free or None)
 
     total = 0
     for ctx in contexts:
         ctx["user_id"] = user_id
+        ctx["letter_model"] = letter_model
         try:
             total += await run_account_cycle(user_id, ctx, tasks)
         except Exception as e:
@@ -475,7 +479,9 @@ async def run_account_cycle(user_id: int, ctx: dict, tasks: list[dict]) -> int:
                         log.info("user_vacancy_skipped_low_score", user_id=user_id, vid=vid, score=score)
                         continue
 
-                letter, letter_variant = await _build_letter(item, title, st, resume_text, ab_index=applied)
+                letter, letter_variant = await _build_letter(
+                    item, title, st, resume_text, ab_index=applied,
+                    model=ctx.get("letter_model"))
                 try:
                     if item.get("has_test"):
                         # Вакансия с тестом: обычный API-отклик не пройдёт.
