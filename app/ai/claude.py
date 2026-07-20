@@ -238,7 +238,24 @@ class ClaudeAI:
         text, inp_tok, out_tok = await self._call(system, user_msg, max_tokens=400,
                                                   model=model, temperature=0.7)
         log.info("ai_cover_letter_generated", title=vacancy_title[:60], model=model or "default")
-        return text.strip(), inp_tok, out_tok
+        return self._humanize(text.strip()), inp_tok, out_tok
+
+    @staticmethod
+    def _humanize(text: str) -> str:
+        """Убрать явные маркеры ИИ, даже если модель проигнорировала промпт.
+
+        Длинное тире и стрелки — то, по чему HR отличает автоотклик. Промпт их
+        запрещает, но подстраховываемся: заменяем гарантированно.
+        """
+        # Стрелки (с пробелами вокруг) и тире между словами → запятая.
+        text = re.sub(r"\s*(→|->|⟶)\s*", ", ", text)
+        text = re.sub(r"\s+[—–]\s+", ", ", text)
+        text = text.replace("—", "-").replace("–", "-")
+        # Схлопнуть артефакты замен: пробел перед запятой, двойные запятые/пробелы.
+        text = re.sub(r"\s+,", ",", text)
+        text = re.sub(r"(,\s*){2,}", ", ", text)
+        text = re.sub(r"[ \t]{2,}", " ", text)
+        return text
 
     async def complete(self, prompt: str, max_tokens: int = 300) -> str:
         """Простой запрос к ИИ (для ответов на тесты вакансий и т.п.)."""
