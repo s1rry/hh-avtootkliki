@@ -56,8 +56,12 @@ def classify_apply(status_code: int, body_text: str) -> tuple[bool | str, dict]:
     if status_code == 404:
         return "already", {"error": "not_found"}
     if status_code == 429:
-        # hh троттлит: слишком часто. Вакансия нормальная — стоит повторить позже.
-        return False, {"error": "rate_limited", "status": 429}
+        # hh троттлит. Тело важно: там бывает и «слишком часто», и дневной лимит.
+        low = (body_text or "").lower()
+        if "limit" in low and "exceeded" in low:
+            return False, {"error": "daily_limit", "body": (body_text or "")[:300]}
+        return False, {"error": "rate_limited", "status": 429,
+                       "body": (body_text or "")[:300]}
     return False, {"status": status_code, "body": (body_text or "")[:300]}
 
 

@@ -460,7 +460,8 @@ async def run_account_cycle(user_id: int, ctx: dict, tasks: list[dict]) -> int:
                                 break
                             pause = RATE_LIMIT_PAUSE_SEC * (attempt + 1)
                             log.warning("user_rate_limited", user_id=user_id, vid=vid,
-                                        attempt=attempt + 1, pause=pause)
+                                        attempt=attempt + 1, pause=pause,
+                                        body=info.get("body", ""))
                             await asyncio.sleep(pause)
                             result, info = await client.apply(vid, letter)
                 except Exception as e:
