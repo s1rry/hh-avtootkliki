@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     ai_proxy: str = ""
 
     # === Оплата (мультиюзер) ===
-    subscription_price: int = 100          # цена расширенного тарифа, ₽
+    subscription_price: int = 299          # цена расширенного тарифа, ₽
     subscription_days: int = 30            # срок за одну оплату
     # ЮMoney: номер кошелька и секрет HTTP-уведомлений (в настройках кошелька).
     yoomoney_wallet: str = ""

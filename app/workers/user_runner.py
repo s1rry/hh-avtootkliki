@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 import structlog
 from sqlalchemy import select, func
 
+from app.config import settings
 from app.database import async_session
 from app.models.user import User
 from app.models.vacancy import Vacancy, VacancyStatus
@@ -39,6 +40,10 @@ MAX_SEARCH_PAGES = 10
 # с каждой попыткой (60с, 120с). Не помогло — останавливаем аккаунт до цикла.
 RATE_LIMIT_RETRIES = 2
 RATE_LIMIT_PAUSE_SEC = 60
+
+# Столько подряд неудачных оценок подряд считаем «ИИ лежит» и останавливаем
+# аккаунт, чтобы не выжечь дневной лимит hh откликами вслепую.
+MAX_SCORE_FAILS = 5
 
 
 async def _build_letter(item: dict, title: str, st, resume_text: str,
@@ -300,7 +305,42 @@ async def run_user_cycle(user_id: int) -> int:
         except Exception as e:
             log.warning("negotiations_refresh_failed", user_id=user_id, error=str(e))
     log.info("user_cycle_done", user_id=user_id, applied=total, accounts=len(contexts))
+    if any(c.get("ai_down") for c in contexts):
+        await _notify_ai_down(user_id)
     return total
+
+
+async def _notify_ai_down(user_id: int) -> None:
+    """ИИ недоступен — предупреждаем пользователя и владельца бота.
+
+    Отклики уже остановлены (fail-closed): лучше не отправить ничего, чем
+    выжечь дневной лимит hh откликами без отбора.
+    """
+    import httpx
+    token = settings.tg_bot_token
+    if not token:
+        return
+    async with async_session() as session:
+        user = await session.get(User, user_id)
+    targets = []
+    if user and user.telegram_id:
+        targets.append((str(user.telegram_id),
+                        "⏸ <b>Отклики на паузе</b>\n\nИИ-отбор временно недоступен, "
+                        "поэтому бот остановился, чтобы не откликаться вслепую и не "
+                        "тратить дневной лимит hh на нерелевантные вакансии.\n\n"
+                        "Ничего делать не нужно — как только ИИ снова заработает, "
+                        "отклики продолжатся автоматически."))
+    admin = str(settings.tg_admin_chat_id or "")
+    if admin and admin != str(getattr(user, "telegram_id", "")):
+        targets.append((admin, f"🔴 ИИ недоступен, отклики остановлены (user_id={user_id}). "
+                               f"Проверь баланс провайдера."))
+    for chat_id, text in targets:
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                await c.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                             json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+        except Exception as e:
+            log.warning("ai_down_notify_failed", chat_id=chat_id, error=str(e))
 
 
 async def run_account_cycle(user_id: int, ctx: dict, tasks: list[dict]) -> int:
@@ -337,6 +377,7 @@ async def run_account_cycle(user_id: int, ctx: dict, tasks: list[dict]) -> int:
         applied = 0
         seen = 0
         scored = 0  # бюджет ИИ-оценок — свой на каждую задачу (иначе 1-я съедает всё)
+        score_fails = 0  # подряд идущие сбои ИИ-оценки
         stop = False
         # Источник вакансий: ключ задачи и/или лента рекомендаций hh под резюме.
         src_mode = getattr(st, "vacancy_source", "keyword")
@@ -418,24 +459,32 @@ async def run_account_cycle(user_id: int, ctx: dict, tasks: list[dict]) -> int:
                     desc = " ".join(x for x in (snip.get("responsibility"), snip.get("requirement")) if x)
                     scored += 1
                     score = await claude_ai.score_vacancy(title, desc, resume_text)
-                    # Fail-open: если ИИ не смог оценить (None) — НЕ блокируем отклик,
-                    # иначе сбой/формат ответа ИИ останавливает всё. Режем только при
-                    # реальной оценке ниже порога.
-                    if score is not None:
-                        async with async_session() as session:
-                            v = await session.get(Vacancy, vac_id)
-                            if v:
-                                v.ai_score = float(score)
-                                if score < st.ai_score_min:
-                                    v.status = VacancyStatus.REJECTED
-                                    v.skip_reason = "ai_low"
-                                    v.ai_reason = f"Умный отбор: {score}% < порога {st.ai_score_min}%"
-                                await session.commit()
-                        if score < st.ai_score_min:
-                            log.info("user_vacancy_skipped_low_score", user_id=user_id, vid=vid, score=score)
-                            continue
-                    else:
-                        log.warning("user_score_none_apply_anyway", user_id=user_id, vid=vid)
+                    # Fail-closed: пользователь включил умный отбор — значит откликаться
+                    # без оценки нельзя. Иначе при сбое ИИ (кончился баланс, упал
+                    # провайдер) бот выжжет дневной лимит hh на нерелевантных вакансиях.
+                    if score is None:
+                        score_fails += 1
+                        log.warning("user_score_unavailable", user_id=user_id, vid=vid,
+                                    fails=score_fails)
+                        if score_fails >= MAX_SCORE_FAILS:
+                            log.error("user_score_ai_down", user_id=user_id, ref=ref)
+                            ctx["ai_down"] = True
+                            stop = True
+                            break
+                        continue
+                    score_fails = 0
+                    async with async_session() as session:
+                        v = await session.get(Vacancy, vac_id)
+                        if v:
+                            v.ai_score = float(score)
+                            if score < st.ai_score_min:
+                                v.status = VacancyStatus.REJECTED
+                                v.skip_reason = "ai_low"
+                                v.ai_reason = f"Умный отбор: {score}% < порога {st.ai_score_min}%"
+                            await session.commit()
+                    if score < st.ai_score_min:
+                        log.info("user_vacancy_skipped_low_score", user_id=user_id, vid=vid, score=score)
+                        continue
 
                 letter, letter_variant = await _build_letter(item, title, st, resume_text, ab_index=applied)
                 try:
