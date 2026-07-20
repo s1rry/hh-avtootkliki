@@ -163,7 +163,8 @@ class HHUserClient:
 
     async def negotiations(self, per_page: int = 100, page: int = 0) -> tuple[list[dict], int, int]:
         """Отклики пользователя (GET /negotiations). Возвращает (items, found, pages).
-        В items у каждого есть state (id: response/invitation/discard),
+        В items у каждого есть state (id: response/interview/discard — приглашение
+        на собеседование это "interview", значения "invitation" в API нет),
         viewed_by_opponent, vacancy.id, updated_at — из них считаем приглашения/просмотры."""
         if not await self.ensure_token():
             return [], 0, 0

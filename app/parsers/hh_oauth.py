@@ -321,7 +321,8 @@ class HHOAuth:
             sid = ((item.get("state") or {}).get("id") or "").lower()
             vac = item.get("vacancy") or {}
             emp = vac.get("employer") or {}
-            if sid == "invitation":
+            # hh называет приглашение "interview" (Собеседование), не "invitation".
+            if sid in ("interview", "invitation"):
                 tab = "invitations"
             elif sid == "discard":
                 tab = "discard"

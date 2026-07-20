@@ -206,7 +206,10 @@ async def _refresh_negotiations(user_id: int, ctx: dict) -> None:
                 continue
             state = (it.get("state") or {}).get("id")
             upd = (it.get("updated_at") or it.get("created_at") or "")[:10]
-            by_vac[vid] = {"invited": state == "invitation",
+            # hh отдаёт приглашение как state.id="interview" (Собеседование).
+            # "invitation" в API не встречается — из-за него приглашения
+            # считались нулём. Оставлен для совместимости.
+            by_vac[vid] = {"invited": state in ("interview", "invitation"),
                            "viewed": bool(it.get("viewed_by_opponent")),
                            "today": upd == msk_today}
         if page >= max(pages - 1, 0):
