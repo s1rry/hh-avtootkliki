@@ -704,7 +704,8 @@ async def cmd_start(message: Message, state: FSMContext, **kw):
             "✉️ Персональные сопроводительные письма (ИИ)\n"
             "📈 Авто-поднятие резюме\n"
             "📊 Статистику откликов и приглашений\n\n"
-            f"🎁 Бета-тест: <b>{settings.beta_days} дней полного доступа</b> бесплатно\n\n"
+            f"🎁 <b>{settings.beta_days} дней полного доступа</b> бесплатно — "
+            f"без карты и автосписаний\n\n"
             "👇 Жми кнопку — подключим hh за минуту (пароль не нужен).",
             reply_markup=_connect_kb(),
         )
@@ -726,11 +727,26 @@ async def cmd_start(message: Message, state: FSMContext, **kw):
         kw = s.search_text or "⚠️ не задано"
         left = max(0, total - used)
         tariff = "💎 Полный доступ" if paid else "Бесплатный"
+        # Строка доступа: пока пробный/оплаченный идёт — сколько дней осталось.
+        # Своё «осталось 4 дня» говорит человеку больше, чем общий счётчик мест.
+        if paid and user.tier_until:
+            import datetime as _d
+            _tu = user.tier_until
+            if _tu.tzinfo is None:
+                _tu = _tu.replace(tzinfo=_d.timezone.utc)
+            days_left = max(0, (_tu - _d.datetime.now(_d.timezone.utc)).days)
+            access_line = (f"⏳ Полный доступ ещё <b>{days_left}</b> дн.\n"
+                           if days_left else "⏳ Полный доступ заканчивается сегодня\n")
+        elif settings.beta_for_all:
+            access_line = (f"🎁 Пробный период: <b>{settings.beta_days} дней</b> "
+                           f"полного доступа новым\n")
+        else:
+            access_line = f"🎟 Бета-доступ: занято <b>{used}/{total}</b>, осталось <b>{left}</b>\n"
         await send_photo_or_text(
             message, "welcome",
             "👋 <b>С возвращением!</b>\n\n"
             f"💎 Тариф: <b>{tariff}</b>\n"
-            f"🎟 Бета-доступ: занято <b>{used}/{total}</b>, осталось <b>{left}</b>\n\n"
+            f"{access_line}\n"
             f"🤖 Автоотклик: <b>{status}</b>\n"
             f"🔑 Ключевые слова: <b>{kw}</b>\n"
             f"📊 Откликов сегодня: <b>{today}</b>\n\n"

@@ -55,7 +55,7 @@ async def get_or_create_user(session: AsyncSession, telegram_id: int, username: 
         # Бета: первым N пользователям — полный доступ на beta_days.
         used = (await session.execute(select(func.count(User.id)))).scalar() or 0
         tier, tier_until = "free", None
-        if used < settings.beta_full_access_slots:
+        if settings.beta_for_all or used < settings.beta_full_access_slots:
             tier = "paid"
             tier_until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
                 days=settings.beta_days)
