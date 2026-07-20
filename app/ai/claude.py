@@ -25,6 +25,10 @@ MODEL = "claude-sonnet-4-6"
 TEST_MODEL = "claude-haiku-4-5"
 AI_STATE_FILE = Path("data/ai_state.json")
 
+# Сколько эндпоинт пула «отдыхает» после ошибки, прежде чем пробовать снова.
+# Лимиты бесплатных тиров минутные, так что перепроверять есть смысл.
+POOL_COOLDOWN_SEC = 600
+
 
 class ClaudeAI:
     def __init__(self):
@@ -49,6 +53,7 @@ class ClaudeAI:
         self.score_pool = self._parse_score_pool(settings.ai_score_pool)
         self._pool_idx = 0
         self._pool_alert_at = 0.0  # когда последний раз предупреждали админа
+        self._cooldown: dict[str, float] = {}  # base_url -> до какого времени пропускать
 
     @staticmethod
     def _parse_score_pool(raw: str) -> list[dict]:
@@ -273,16 +278,24 @@ class ClaudeAI:
         бы весь минутный лимит, а остальные простаивали. Все бесплатные легли —
         уходим на основного платного, чтобы отклики не встали.
         """
+        import time as _t
+        now = _t.time()
         errors = []
         for i in range(len(self.score_pool)):
             ep = self.score_pool[(self._pool_idx + i) % len(self.score_pool)]
+            # Упавший эндпоинт отдыхает: иначе каждый скоринг сначала ждёт
+            # таймаута от мёртвого ключа и только потом идёт к живому.
+            if self._cooldown.get(ep["base_url"], 0) > now:
+                continue
             try:
                 text, _, _ = await self._call_openai_compatible(
                     system, user_msg, max_tokens=800,
                     model=ep["model"], base_url=ep["base_url"], api_key=ep["api_key"])
                 self._pool_idx = (self._pool_idx + i + 1) % len(self.score_pool)
+                self._cooldown.pop(ep["base_url"], None)
                 return text
             except Exception as e:
+                self._cooldown[ep["base_url"]] = now + POOL_COOLDOWN_SEC
                 errors.append(f"{ep['base_url']}: {type(e).__name__}")
         if errors:
             log.warning("ai_score_pool_exhausted", tried=errors)
