@@ -71,6 +71,8 @@ BTN_STATS = "📊 Общая"
 BTN_SETTINGS = "⚙️ Настройки"
 BTN_SUPPORT = "🆘 Поддержка"
 BTN_PROJECTS = "🚀 Другие проекты"
+# Пока hh не подключён, остальные кнопки бесполезны — показываем только эти две.
+from app.bot.buttons import BTN_CONNECT, BTN_WHY  # noqa: E402
 
 
 def _connect_kb() -> InlineKeyboardMarkup:
@@ -80,7 +82,18 @@ def _connect_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🛡 А это безопасно?", callback_data="connect:why")]])
 
 
-def main_reply_kb() -> ReplyKeyboardMarkup:
+def main_reply_kb(connected: bool = True) -> ReplyKeyboardMarkup:
+    """Меню бота. До подключения hh — только две кнопки.
+
+    Задачи/статистика/настройки без подключённого аккаунта всё равно ничего
+    не покажут, а лишний выбор уводит от единственного нужного действия.
+    """
+    if not connected:
+        return ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text=BTN_CONNECT)],
+                      [KeyboardButton(text=BTN_WHY)]],
+            resize_keyboard=True,
+        )
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=BTN_TASK), KeyboardButton(text=BTN_STATS)],
@@ -695,6 +708,9 @@ async def cmd_start(message: Message, state: FSMContext, **kw):
             "👇 Жми кнопку — подключим hh за минуту (пароль не нужен).",
             reply_markup=_connect_kb(),
         )
+        # Нижнее меню тоже урезаем до подключения — одно ясное действие.
+        await message.answer("Меню — кнопки внизу 👇",
+                             reply_markup=main_reply_kb(connected=False))
     else:
         async with async_session() as session:
             user = await _load(session, message)

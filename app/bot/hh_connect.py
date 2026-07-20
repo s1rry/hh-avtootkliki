@@ -19,6 +19,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery
 
+from app.bot.buttons import BTN_CONNECT, BTN_WHY
 from app.database import async_session
 from app.parsers.hh_login import OTPLoginSession, get_session, set_session, drop_session
 from app.parsers.hh_resume import fetch_resume
@@ -84,14 +85,24 @@ async def cb_connect_start(cb: CallbackQuery, state: FSMContext, **kw):
     await cb.answer()
 
 
-@router.callback_query(F.data == "connect:why")
-async def cb_connect_why(cb: CallbackQuery, state: FSMContext, **kw):
+@router.message(F.text == BTN_CONNECT)
+async def btn_connect(message: Message, state: FSMContext, **kw):
+    """Нижняя кнопка меню для неподключённых."""
+    await _start_connect(message, state)
+
+
+@router.message(F.text == BTN_WHY)
+async def btn_why(message: Message, state: FSMContext, **kw):
+    await _send_why(message)
+
+
+async def _send_why(message: Message) -> None:
     """Снимаем главный барьер: «зачем боту мой телефон и что он увидит».
 
     Половина зашедших не доходит до подключения — упирается ровно сюда.
     """
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-    await cb.message.answer(
+    await message.answer(
         "🛡 <b>Коротко о безопасности</b>\n\n"
         "<b>Пароль не спрашиваем.</b> Вход на hh идёт по коду, который hh "
         "присылает лично тебе. Мы его не знаем и знать не можем.\n\n"
@@ -109,6 +120,11 @@ async def cb_connect_why(cb: CallbackQuery, state: FSMContext, **kw):
             InlineKeyboardButton(text="🔗 Понятно, подключить",
                                  callback_data="connect:start")]]),
     )
+
+
+@router.callback_query(F.data == "connect:why")
+async def cb_connect_why(cb: CallbackQuery, state: FSMContext, **kw):
+    await _send_why(cb.message)
     await cb.answer()
 
 
