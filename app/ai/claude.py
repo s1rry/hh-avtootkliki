@@ -232,10 +232,11 @@ class ClaudeAI:
 Описание:
 {vacancy_description}"""
 
-        # Высокая температура — письма к разным вакансиям должны отличаться,
-        # иначе поток одинаковых сопроводительных читается как ботовый.
+        # Умеренно повышенная температура: письма к разным вакансиям должны
+        # отличаться, но 0.9 давал грамматические сбои (сбитые местоимения).
+        # Разнообразие в основном обеспечивает промпт («начинай по-разному»).
         text, inp_tok, out_tok = await self._call(system, user_msg, max_tokens=400,
-                                                  model=model, temperature=0.9)
+                                                  model=model, temperature=0.7)
         log.info("ai_cover_letter_generated", title=vacancy_title[:60], model=model or "default")
         return text.strip(), inp_tok, out_tok
 
