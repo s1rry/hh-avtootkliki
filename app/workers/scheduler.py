@@ -221,10 +221,11 @@ class WorkerScheduler:
             return
         now = _dt.now(_tz.utc)
         kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="🔗 Подключить hh.ru за 1 минуту", callback_data="connect:start")]])
+            InlineKeyboardButton(text="🔗 Подключить hh.ru за 1 минуту", callback_data="connect:start")],
+            [InlineKeyboardButton(text="🛡 А это безопасно?", callback_data="connect:why")]])
         async with async_session() as session:
             users = (await session.execute(
-                select(User).where(User.hh_connected.is_(False), User.connect_reminders < 2)
+                select(User).where(User.hh_connected.is_(False), User.connect_reminders < 3)
             )).scalars().all()
             for u in users:
                 created = u.created_at
@@ -242,6 +243,14 @@ class WorkerScheduler:
                 elif u.connect_reminders == 1 and age_h >= 24:
                     text = ("🔔 Напоминаем: подключи hh.ru — и бот начнёт откликаться на вакансии "
                             "сам, 24/7. Минута, без пароля. Жми 👇")
+                    send = True
+                # Третье касание — про результат, а не про подключение: к этому
+                # моменту абстрактное «подключи» человека уже не цепляет.
+                elif u.connect_reminders == 2 and age_h >= 72:
+                    text = ("📊 Пока ты думаешь, бот у других отправляет по "
+                            "<b>200 откликов в день</b> — столько руками не осилить.\n\n"
+                            "Подключение занимает минуту и пароль не нужен. "
+                            "Не понравится — отключишь одной кнопкой. Жми 👇")
                     send = True
                 if send:
                     try:

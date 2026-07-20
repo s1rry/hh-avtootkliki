@@ -84,6 +84,34 @@ async def cb_connect_start(cb: CallbackQuery, state: FSMContext, **kw):
     await cb.answer()
 
 
+@router.callback_query(F.data == "connect:why")
+async def cb_connect_why(cb: CallbackQuery, state: FSMContext, **kw):
+    """Снимаем главный барьер: «зачем боту мой телефон и что он увидит».
+
+    Половина зашедших не доходит до подключения — упирается ровно сюда.
+    """
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    await cb.message.answer(
+        "🛡 <b>Коротко о безопасности</b>\n\n"
+        "<b>Пароль не спрашиваем.</b> Вход на hh идёт по коду, который hh "
+        "присылает лично тебе. Мы его не знаем и знать не можем.\n\n"
+        "<b>Телефон нужен только hh</b>, чтобы отправить тебе этот код. "
+        "Бот передаёт номер на hh.ru и нигде не публикует.\n\n"
+        "<b>Что бот делает:</b> ищет вакансии, пишет сопроводительные и "
+        "отправляет отклики от твоего имени — то же, что ты делал бы руками.\n\n"
+        "<b>Чего не делает:</b> не меняет резюме, не удаляет отклики, "
+        "не пишет работодателям от себя, не публикует твои данные.\n\n"
+        "<b>Доступ отзывается в любой момент</b> — кнопка «Отключить hh» "
+        "в настройках, либо смени пароль на hh.ru.\n\n"
+        "Код бота открыт: github.com/s1rry/hhautoapply — можно проверить.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🔗 Понятно, подключить",
+                                 callback_data="connect:start")]]),
+    )
+    await cb.answer()
+
+
 @router.message(ConnectSG.phone)
 async def connect_phone(message: Message, state: FSMContext, **kw):
     if await _is_cancel(message, state):

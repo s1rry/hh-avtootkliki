@@ -76,7 +76,8 @@ BTN_PROJECTS = "🚀 Другие проекты"
 def _connect_kb() -> InlineKeyboardMarkup:
     """Кнопка запуска подключения hh (обрабатывает hh_connect: connect:start)."""
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🔗 Подключить hh.ru за 1 минуту", callback_data="connect:start")]])
+        InlineKeyboardButton(text="🔗 Подключить hh.ru за 1 минуту", callback_data="connect:start")],
+        [InlineKeyboardButton(text="🛡 А это безопасно?", callback_data="connect:why")]])
 
 
 def main_reply_kb() -> ReplyKeyboardMarkup:
