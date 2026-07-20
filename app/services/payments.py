@@ -86,6 +86,7 @@ async def apply_payment(
     base = tu if (tu and tu > now) else now
     user.tier = "paid"
     user.tier_until = base + datetime.timedelta(days=days)
+    user.tier_reminders = 0  # новый период — напомним и о его окончании
 
     session.add(Payment(
         user_id=user.id, provider=provider, amount=amount,

@@ -31,6 +31,9 @@ class User(Base, TimestampMixin):
     hh_connected: Mapped[bool] = mapped_column(Boolean, default=False)
     # Сколько напоминаний «подключи hh» отправлено (ре-энгейджмент неподключённых).
     connect_reminders: Mapped[int] = mapped_column(Integer, default=0)
+    # Сколько напоминаний об окончании тарифа отправлено (за 3 дня и за 1 день).
+    # Сбрасывается в 0 при оплате — чтобы напомнить и в следующем периоде.
+    tier_reminders: Mapped[int] = mapped_column(Integer, default=0)
     hh_access_token: Mapped[str | None] = mapped_column(EncryptedText)
     hh_refresh_token: Mapped[str | None] = mapped_column(EncryptedText)
     hh_token_expires: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))

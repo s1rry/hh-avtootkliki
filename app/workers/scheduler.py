@@ -14,6 +14,16 @@ from app.workers.message_worker import check_all_messages
 
 log = structlog.get_logger()
 
+
+def _tier_free_limit() -> int:
+    from app.bot.task_menu import FREE_DAILY_LIMIT
+    return FREE_DAILY_LIMIT
+
+
+def _tier_paid_limit() -> int:
+    from app.bot.task_menu import PAID_DAILY_LIMIT
+    return PAID_DAILY_LIMIT
+
 MSK = ZoneInfo("Europe/Moscow")
 STATE_FILE = Path("data/scheduler_state.json")
 
@@ -242,6 +252,80 @@ class WorkerScheduler:
                         u.connect_reminders += 1  # не долбить недоступных
             await session.commit()
 
+    async def _job_tier_expiry(self):
+        """Конец доступа близко — показать результат и предложить продлить.
+
+        Два напоминания: за 3 дня и за 1 день. Считаем личную статистику за
+        всё время: цифры собственных откликов и приглашений убеждают сильнее
+        любого описания тарифа.
+        """
+        from sqlalchemy import select, func
+        from datetime import datetime as _dt, timezone as _tz
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        from app.database import async_session
+        from app.models.user import User
+        from app.models.application import Application, ApplicationStatus
+        from app.models.search_task import SearchTask
+        from app.config import settings as _s
+        if not self.bot:
+            return
+        now = _dt.now(_tz.utc)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"💎 Продлить за {_s.subscription_price}₽",
+                                  callback_data="pay:start")],
+            [InlineKeyboardButton(text="Что входит в тариф", callback_data="task:tariff")],
+        ])
+        async with async_session() as session:
+            users = (await session.execute(
+                select(User).where(User.tier == "paid", User.tier_until.is_not(None),
+                                   User.tier_reminders < 2)
+            )).scalars().all()
+            for u in users:
+                until = u.tier_until
+                if until is None:
+                    continue
+                if until.tzinfo is None:  # SQLite отдаёт naive — трактуем как UTC
+                    until = until.replace(tzinfo=_tz.utc)
+                days_left = (until - now).total_seconds() / 86400
+                stage = None
+                if u.tier_reminders == 0 and days_left <= 3:
+                    stage = 3
+                elif u.tier_reminders == 1 and days_left <= 1:
+                    stage = 1
+                if stage is None:
+                    continue
+
+                sent = (await session.execute(
+                    select(func.count(Application.id)).where(
+                        Application.user_id == u.id,
+                        Application.status == ApplicationStatus.SENT)
+                )).scalar() or 0
+                invites = (await session.execute(
+                    select(func.coalesce(func.sum(SearchTask.invites), 0)).where(
+                        SearchTask.user_id == u.id)
+                )).scalar() or 0
+
+                if sent:
+                    stats = (f"За это время бот отправил за тебя <b>{sent}</b> откликов"
+                             + (f" и принёс <b>{invites}</b> приглашений" if invites else "")
+                             + ".\n\n")
+                else:
+                    stats = ""
+                when = "через 3 дня" if stage == 3 else "завтра"
+                free = _tier_free_limit()
+                text = (f"⏳ <b>Полный доступ заканчивается {when}</b>\n\n"
+                        f"{stats}"
+                        f"После этого останется бесплатный тариф — до {free} откликов в день "
+                        f"вместо {_tier_paid_limit()}, без рекомендаций hh и нескольких аккаунтов.\n\n"
+                        f"Продлить — {_s.subscription_price}₽ в месяц 👇")
+                try:
+                    await self.bot.send_message(u.telegram_id, text, reply_markup=kb,
+                                                parse_mode="HTML")
+                except Exception as e:
+                    log.warning("tier_reminder_failed", user_id=u.id, error=str(e))
+                u.tier_reminders += 1  # и при ошибке — не долбить недоступных
+            await session.commit()
+
     def _start_multi(self, interval: int):
         """Планировщик мультиюзерного режима: цикл откликов + поднятие резюме."""
         from datetime import datetime, timedelta
@@ -288,6 +372,19 @@ class WorkerScheduler:
             minute=0,
             id="daily_digest",
             name="Дайджест дня",
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=3600,
+        )
+        # Напоминания об окончании тарифа — раз в день в 12:00 МСК.
+        # Днём, а не ночью: сообщение с оплатой должно попасть в активные часы.
+        self.scheduler.add_job(
+            self._job_tier_expiry,
+            "cron",
+            hour=12,
+            minute=0,
+            id="tier_expiry",
+            name="Напоминания об окончании тарифа",
             coalesce=True,
             max_instances=1,
             misfire_grace_time=3600,
