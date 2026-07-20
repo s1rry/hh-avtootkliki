@@ -52,13 +52,13 @@ async def get_or_create_user(session: AsyncSession, telegram_id: int, username: 
     """Найти пользователя по telegram_id или создать нового (multi-режим)."""
     user = (await session.execute(select(User).where(User.telegram_id == telegram_id))).scalar_one_or_none()
     if user is None:
-        # Бета: первым N пользователям — полный доступ на subscription_days.
+        # Бета: первым N пользователям — полный доступ на beta_days.
         used = (await session.execute(select(func.count(User.id)))).scalar() or 0
         tier, tier_until = "free", None
         if used < settings.beta_full_access_slots:
             tier = "paid"
             tier_until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
-                days=settings.subscription_days)
+                days=settings.beta_days)
         user = User(
             telegram_id=telegram_id, username=username,
             settings=UserSettings().model_dump(), tier=tier, tier_until=tier_until,
