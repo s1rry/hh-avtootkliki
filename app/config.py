@@ -113,8 +113,9 @@ class Settings(BaseSettings):
     max_applies_per_day: int = 200            # legacy (combined cap)
     max_applies_per_day_hh: int = 200
     max_applies_per_day_habr: int = 50
-    apply_delay_min: int = 3
-    apply_delay_max: int = 12
+    # Пауза между откликами. Ниже 6с hh начинает отдавать 429.
+    apply_delay_min: int = 6
+    apply_delay_max: int = 20
     # Human-like typing speed (ms per character)
     type_delay_min: int = 30
     type_delay_max: int = 120

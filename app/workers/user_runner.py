@@ -35,6 +35,11 @@ MAX_SCORINGS_PER_CYCLE = 40
 # ещё не отработанных вакансий, когда топ уже весь обработан.
 MAX_SEARCH_PAGES = 10
 
+# hh отвечает 429 при слишком частых откликах. Ждём и повторяем — пауза растёт
+# с каждой попыткой (60с, 120с). Не помогло — останавливаем аккаунт до цикла.
+RATE_LIMIT_RETRIES = 2
+RATE_LIMIT_PAUSE_SEC = 60
+
 
 async def _build_letter(item: dict, title: str, st, resume_text: str,
                         ab_index: int = 0) -> tuple[str, str | None]:
@@ -449,9 +454,24 @@ async def run_account_cycle(user_id: int, ctx: dict, tasks: list[dict]) -> int:
                             continue
                     else:
                         result, info = await client.apply(vid, letter)
+                        # hh троттлит (429) — ждём и повторяем, вакансия не теряется.
+                        for attempt in range(RATE_LIMIT_RETRIES):
+                            if info.get("error") != "rate_limited":
+                                break
+                            pause = RATE_LIMIT_PAUSE_SEC * (attempt + 1)
+                            log.warning("user_rate_limited", user_id=user_id, vid=vid,
+                                        attempt=attempt + 1, pause=pause)
+                            await asyncio.sleep(pause)
+                            result, info = await client.apply(vid, letter)
                 except Exception as e:
                     log.error("user_apply_error", user_id=user_id, vid=vid, error=str(e))
                     continue
+
+                if info.get("error") == "rate_limited":
+                    # Не сдался и после повторов — притормаживаем весь аккаунт.
+                    log.warning("user_rate_limit_giveup", user_id=user_id, ref=ref)
+                    stop = True
+                    break
 
                 if info.get("error") == "daily_limit":
                     log.info("user_daily_limit_hit", user_id=user_id, ref=ref)

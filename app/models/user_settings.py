@@ -93,8 +93,8 @@ class UserSettings(BaseModel):
     apply_hour_start: int = 9
     apply_hour_end: int = 21
     # Пауза между откликами, сек (анти-бан).
-    apply_delay_min: int = 3
-    apply_delay_max: int = 12
+    apply_delay_min: int = 6
+    apply_delay_max: int = 20
 
     def search_phrases(self) -> list[str]:
         """Ключевые фразы для поиска (через запятую/слэш/перенос строки).

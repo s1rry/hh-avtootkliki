@@ -55,6 +55,9 @@ def classify_apply(status_code: int, body_text: str) -> tuple[bool | str, dict]:
         return False, {"error": "auth_expired"}
     if status_code == 404:
         return "already", {"error": "not_found"}
+    if status_code == 429:
+        # hh троттлит: слишком часто. Вакансия нормальная — стоит повторить позже.
+        return False, {"error": "rate_limited", "status": 429}
     return False, {"status": status_code, "body": (body_text or "")[:300]}
 
 
