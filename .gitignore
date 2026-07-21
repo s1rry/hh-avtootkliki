@@ -11,3 +11,10 @@ venv/
 sessions/
 *.session
 configs/resume.txt
+
+# SSH deploy keys — НИКОГДА не коммитить
+kod
+kod.pub
+*.pem
+id_ed25519*
+id_rsa*
