@@ -23,9 +23,9 @@ DEFAULT_TEMPLATE = (
     "{Здравствуйте|Добрый день}! "
     "{Заинтересовала ваша вакансия|Откликаюсь на вашу вакансию|"
     "Заинтересовало ваше предложение}%(vacancy_suffix)s. "
-    "Имею коммерческий опыт в роли системного и бизнес-аналитика: "
-    "сбор и анализ требований, BPMN / UML, проектирование REST API "
-    "и интеграций, SQL, постановка задач разработчикам, приёмка результатов. "
+    "{Мой опыт и навыки соответствуют требованиям|"
+    "Считаю, что мой опыт хорошо подходит под задачи|"
+    "Мои компетенции отвечают вашим требованиям}. "
     "{Готов обсудить детали и пройти интервью.|"
     "Буду рад обсудить детали на интервью.|"
     "Готов подробнее рассказать о своём опыте на собеседовании.}"
@@ -38,15 +38,18 @@ def _expand_choices(text: str) -> str:
     return _CHOICE_RE.sub(lambda m: random.choice(m.group(1).split("|")), text)
 
 
-def render_letter(vacancy_name: str = "", template: str | None = None) -> str:
-    """Собрать готовое письмо из шаблона."""
+def render_letter(vacancy_name: str = "", template: str | None = None, contact: str | None = None) -> str:
+    """Собрать готовое письмо из шаблона.
+
+    template — если задан (напр. своё письмо пользователя), используется вместо
+    стандартного. Поддерживает те же плейсхолдеры и {вариант|вариант}.
+    contact — контакт для связи; None → глобальный settings.contacts.
+    """
     text = _expand_choices(template or DEFAULT_TEMPLATE)
     name = (vacancy_name or "").strip()
     suffix = f" «{name}»" if name else ""
     text = text.replace("%(vacancy_suffix)s", suffix)
     text = text.replace("%(vacancy_name)s", name)
-    # Контакты берутся из настроек (в мультиюзере — из профиля пользователя).
-    # Если не заданы, строка контактов просто опускается.
-    contacts = (settings.contacts or "").strip()
+    contacts = (contact if contact is not None else settings.contacts or "").strip()
     text = text.replace("%(contacts)s", f"\n\nКонтакты: {contacts}" if contacts else "")
     return text.rstrip()

@@ -80,9 +80,13 @@ async def apply_payment(
         return False
 
     now = datetime.datetime.now(datetime.timezone.utc)
-    base = user.tier_until if (user.tier_until and user.tier_until > now) else now
+    tu = user.tier_until
+    if tu is not None and tu.tzinfo is None:  # SQLite отдаёт naive — трактуем как UTC
+        tu = tu.replace(tzinfo=datetime.timezone.utc)
+    base = tu if (tu and tu > now) else now
     user.tier = "paid"
     user.tier_until = base + datetime.timedelta(days=days)
+    user.tier_reminders = 0  # новый период — напомним и о его окончании
 
     session.add(Payment(
         user_id=user.id, provider=provider, amount=amount,

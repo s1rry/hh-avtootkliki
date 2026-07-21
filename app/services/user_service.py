@@ -7,8 +7,10 @@
 """
 from __future__ import annotations
 
+import datetime
+
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -16,6 +18,13 @@ from app.models.user import User
 from app.models.user_settings import UserSettings
 
 log = structlog.get_logger()
+
+
+async def beta_slots(session: AsyncSession) -> tuple[int, int]:
+    """(занято, всего) бета-слотов полного доступа."""
+    total = settings.beta_full_access_slots
+    used = (await session.execute(select(func.count(User.id)))).scalar() or 0
+    return min(used, total), total
 
 
 def _single_user_telegram_id() -> int:
@@ -43,11 +52,21 @@ async def get_or_create_user(session: AsyncSession, telegram_id: int, username: 
     """Найти пользователя по telegram_id или создать нового (multi-режим)."""
     user = (await session.execute(select(User).where(User.telegram_id == telegram_id))).scalar_one_or_none()
     if user is None:
-        user = User(telegram_id=telegram_id, username=username, settings=UserSettings().model_dump())
+        # Бета: первым N пользователям — полный доступ на beta_days.
+        used = (await session.execute(select(func.count(User.id)))).scalar() or 0
+        tier, tier_until = "free", None
+        if settings.beta_for_all or used < settings.beta_full_access_slots:
+            tier = "paid"
+            tier_until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
+                days=settings.beta_days)
+        user = User(
+            telegram_id=telegram_id, username=username,
+            settings=UserSettings().model_dump(), tier=tier, tier_until=tier_until,
+        )
         session.add(user)
         await session.commit()
         await session.refresh(user)
-        log.info("user_created", telegram_id=telegram_id)
+        log.info("user_created", telegram_id=telegram_id, tier=tier, beta_slot=(used + 1))
     return user
 
 

@@ -10,9 +10,16 @@ class Settings(BaseSettings):
     #   multi  — мультиюзерный (cloud SaaS): много пользователей, тарифы, per-user hh.
     mode: str = "single"
 
+    # Ключ шифрования чувствительных полей БД (hh-токены, tg-сессии) at-rest.
+    # Любая строка-парольная фраза; из неё детерминированно выводится ключ Fernet.
+    # Пусто = БЕЗ шифрования (обратная совместимость) — обязательно задай в проде!
+    encryption_key: str = ""
+
     # Telegram
     tg_bot_token: str = ""
     tg_admin_chat_id: str = ""
+    # Отдельный бот поддержки (мост юзер↔админ). Запускается своим процессом.
+    support_bot_token: str = ""
     tg_api_server: str = ""  # Custom Telegram Bot API URL (e.g. for proxy)
     tg_proxy: str = ""  # SOCKS5/HTTP proxy for Telegram (e.g. socks5://127.0.0.1:40000)
 
@@ -39,18 +46,52 @@ class Settings(BaseSettings):
     ai_api_key: str = ""
     ai_base_url: str = "https://api.cerebras.ai/v1"
     ai_model: str = "gpt-oss-120b"
+    # Отдельная (дешёвая) модель для скоринга вакансий — он возвращает одно число,
+    # мощная модель тут не нужна. Пусто → используется ai_model.
+    ai_score_model: str = ""
+    # Пул эндпоинтов для скоринга: "url|ключ|модель", несколько — через ;
+    # Скоринг возвращает одно число, поэтому его можно гонять на бесплатных
+    # тирах. Ключи перебираются по кругу (нагрузка размазывается), при ошибке
+    # берётся следующий, а если полегли все — запрос уходит на основного
+    # платного провайдера, чтобы отклики не встали.
+    ai_score_pool: str = ""
+    # Модель для писем на бесплатном тарифе. Письма остаются у всех (это то,
+    # ради чего приходят), но платным пишет модель посильнее — и это видно
+    # в тексте. Пусто → всем одна модель ai_model.
+    ai_letter_model_free: str = ""
+    # Прокси для ИИ-запросов (если провайдер недоступен напрямую с RU-сервера).
+    # Пусто = использовать tg_proxy (тот же SOCKS, что для Telegram), если он задан.
+    ai_proxy: str = ""
 
     # === Оплата (мультиюзер) ===
-    subscription_price: int = 100          # цена расширенного тарифа, ₽
+    subscription_price: int = 299          # цена расширенного тарифа, ₽
     subscription_days: int = 30            # срок за одну оплату
     # ЮMoney: номер кошелька и секрет HTTP-уведомлений (в настройках кошелька).
     yoomoney_wallet: str = ""
     yoomoney_secret: str = ""
+    # ЮKassa (магазин): shopId и секретный ключ из ЛК ЮKassa.
+    yookassa_shop_id: str = ""
+    yookassa_secret_key: str = ""
+    # Куда вернуть пользователя после оплаты (страница/бот).
+    yookassa_return_url: str = "https://t.me/"
     # Крипто-адреса для ручной оплаты (подтверждает админ).
     crypto_ton: str = ""
     crypto_usdt_trc20: str = ""
-    # Порт локального веб-сервера для вебхука ЮMoney.
+    # Порт локального веб-сервера для вебхука оплаты.
     payment_webhook_port: int = 8088
+
+    # Пробный период для КАЖДОГО нового пользователя (как в VPN-подписках).
+    # Слоты — тупик: кончатся, и новички перестанут видеть продукт в полную
+    # силу, воронка обрубится сверху. Пробный период масштабируется всегда.
+    beta_for_all: bool = True
+    # Ограничение по количеству — работает только при beta_for_all=false.
+    beta_full_access_slots: int = 50
+    # Срок бесплатного бета-доступа. Отдельно от subscription_days: бета — это
+    # проба, а не подаренный месяц (месяц ИИ на пользователя стоит нам денег).
+    beta_days: int = 7
+
+    # Максимум hh-аккаунтов у пользователя на расширенном тарифе (включая основной).
+    max_hh_accounts: int = 3
 
     # Database
     database_url: str = "sqlite+aiosqlite:///data/jobhunter.db"
@@ -72,6 +113,8 @@ class Settings(BaseSettings):
     # Контакты для подписи в письмах (email, tg и т.п.). В мультиюзере
     # берутся из профиля пользователя; здесь — для одиночного режима.
     contacts: str = ""
+    # Контакт поддержки для кнопки в боте (мультиюзер).
+    support_contact: str = "@egorov_analyst"
     desired_position: str = "Бизнес/Системный аналитик (Middle)"
     desired_salary_min: int = 200000
     desired_salary_max: int = 400000
@@ -87,8 +130,9 @@ class Settings(BaseSettings):
     max_applies_per_day: int = 200            # legacy (combined cap)
     max_applies_per_day_hh: int = 200
     max_applies_per_day_habr: int = 50
-    apply_delay_min: int = 3
-    apply_delay_max: int = 12
+    # Пауза между откликами. Ниже 6с hh начинает отдавать 429.
+    apply_delay_min: int = 6
+    apply_delay_max: int = 20
     # Human-like typing speed (ms per character)
     type_delay_min: int = 30
     type_delay_max: int = 120

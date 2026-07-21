@@ -15,6 +15,8 @@
 """
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel, Field
 
 
@@ -24,10 +26,20 @@ class UserSettings(BaseModel):
     search_text: str = ""
     # Где искать: в названии вакансии/компании/описании.
     search_fields: list[str] = Field(default_factory=lambda: ["name"])
+    # Искать не только в названии, но и в описании вакансии (в разы больше
+    # вакансий; точность держит умный ИИ-отбор). По умолчанию включено.
+    search_in_description: bool = True
+    # Источник вакансий: "keyword" — поиск по ключу задачи; "recommended" —
+    # лента рекомендаций hh под резюме (/similar_vacancies, большая и сама
+    # обновляется); "both" — сначала ключ, потом рекомендации.
+    vacancy_source: str = "keyword"
     # Регион(ы) — id областей hh (Москва=1, СПб=2, вся Россия=113).
     areas: list[int] = Field(default_factory=lambda: [1])
     # Слова-исключения (через запятую).
     excluded_text: str = ""
+    # Контакт для сопроводительных писем (например второй ТГ @username, почта,
+    # телефон). Подставляется в письмо, чтобы HR писал не на личный ТГ.
+    contact: str = ""
 
     # --- Условия работы ---
     # Формат работы (новый параметр hh work_format).
@@ -56,27 +68,63 @@ class UserSettings(BaseModel):
     # accept_handicapped и т.п. — опционально, для инклюзивного поиска.
     health_features: list[str] = Field(default_factory=list)
 
-    # --- Автоотклик ---
+    # --- Письма / ИИ ---
     ai_enabled: bool = False             # ИИ-персонализация писем
+    ai_custom_prompt: str = ""           # свой промт для ИИ-писем (пусто = стандартный)
+    custom_letter: str = ""              # своё готовое письмо (шлётся как есть, без ИИ)
+    # A/B тест писем: бот по очереди шлёт письмо A и B, меряет приглашения.
+    ab_enabled: bool = False
+    letter_a: str = ""
+    letter_b: str = ""
+    # Умный отбор: ИИ оценивает вакансию по резюме (0–100) и отклик идёт
+    # только на совпадения >= ai_score_min. Отсекает слабые вакансии.
+    ai_score_enabled: bool = False
+    ai_score_min: int = 70
+    # Режим сопроводительных писем:
+    #   always   — всегда прикладывать письмо (шаблон или ИИ)
+    #   required — только когда вакансия требует письмо
+    #   off      — не прикладывать письмо
+    letter_mode: str = "always"
+
+    # --- Автоотклик ---
+    resume_bump: bool = True             # авто-поднятие резюме на hh (раз в ~4ч)
     daily_limit: int = 50                # лимит откликов в день (free=50, paid выше)
     # Окно откликов по МСК (по умолчанию 9-21, настраивается).
     apply_hour_start: int = 9
     apply_hour_end: int = 21
     # Пауза между откликами, сек (анти-бан).
-    apply_delay_min: int = 3
-    apply_delay_max: int = 12
+    apply_delay_min: int = 6
+    apply_delay_max: int = 20
+
+    def search_phrases(self) -> list[str]:
+        """Ключевые фразы для поиска (через запятую/слэш/перенос строки).
+
+        hh не понимает булев OR в тексте (возвращает 0), поэтому ищем по каждой
+        фразе отдельным запросом и объединяем — как при одиночной фразе, что
+        заведомо работает.
+        """
+        raw = (self.search_text or "").strip()
+        if not raw:
+            return []
+        return [p.strip() for p in re.split(r"[,/\n]+", raw) if p.strip()]
+
+    def excluded_words(self) -> list[str]:
+        """Слова-исключения (через запятую/слэш/перенос) в нижнем регистре.
+
+        Фильтруем на своей стороне: hh не понимает список исключений (запятую
+        трактует как фразу), поэтому отсев делаем сами по названию/описанию.
+        """
+        raw = (self.excluded_text or "").strip().lower()
+        if not raw:
+            return []
+        return [w.strip() for w in re.split(r"[,/\n]+", raw) if w.strip()]
 
     def to_hh_params(self) -> dict:
-        """Собрать параметры для поиска вакансий hh /vacancies."""
+        """Параметры поиска hh /vacancies БЕЗ text — фразу подставляет движок."""
         params: dict = {}
-        if self.search_text:
-            params["text"] = self.search_text
-        if self.search_fields:
-            params["search_field"] = self.search_fields
+        params["search_field"] = ["name", "description"] if self.search_in_description else ["name"]
         if self.areas:
             params["area"] = self.areas
-        if self.excluded_text:
-            params["excluded_text"] = self.excluded_text
         if self.work_format:
             params["work_format"] = self.work_format
         if self.schedule:

@@ -42,6 +42,7 @@ SEL_LOGIN = 'input[data-qa="login-input-username"]'
 SEL_CODE_CONTAINER = 'div[data-qa="account-login-code-input"]'
 SEL_PIN = 'input[data-qa="magritte-pincode-input-field"]'
 SEL_CAPTCHA = 'img[data-qa="account-captcha-picture"]'
+SEL_CAPTCHA_INPUT = 'input[data-qa="account-captcha-input"]'
 
 
 class OTPLoginSession:
@@ -124,6 +125,35 @@ class OTPLoginSession:
 
         return {"status": "code_sent"}
 
+    async def submit_captcha(self, text: str) -> dict:
+        """Ввести разгаданную человеком капчу и продолжить к полю кода.
+
+        return {"status": "code_sent"} | {"status": "captcha"} (не та) | {"error": ...}
+        """
+        if not self.page:
+            return {"error": "no_session"}
+        try:
+            await self.page.fill(SEL_CAPTCHA_INPUT, text.strip())
+            await self.page.press(SEL_CAPTCHA_INPUT, "Enter")
+        except Exception as e:
+            return {"error": f"captcha_fill: {e}"}
+        # Капча снова видна → введена неверно, отдаём новую картинку.
+        try:
+            cap = await self.page.wait_for_selector(SEL_CAPTCHA, timeout=3000, state="visible")
+            if cap:
+                CAPTCHA_FILE.write_bytes(await cap.screenshot())
+                return {"status": "captcha"}
+        except Exception:
+            pass
+        # Иначе ждём поле кода.
+        try:
+            await self.page.wait_for_selector(SEL_CODE_CONTAINER, timeout=15000)
+            return {"status": "code_sent"}
+        except Exception as e:
+            if self.code_future and self.code_future.done():
+                return {"status": "code_sent"}
+            return {"error": f"no_code_after_captcha: {e}"}
+
     async def submit_code(self, code: str) -> dict:
         """Ввести код, забрать OAuth-код, сохранить токен и cookies."""
         if not self.page:
@@ -141,10 +171,11 @@ class OTPLoginSession:
         if not auth_code:
             return {"error": "empty_oauth_code"}
 
-        # Сохранить cookies-сессию (нужно браузерному прохождению тестов)
+        # Сохранить cookies-сессию (нужна для веб-действий: скрытие отказов, тесты).
+        cookies_state = None
         try:
             COOKIES_FILE.parent.mkdir(parents=True, exist_ok=True)
-            await self.context.storage_state(path=str(COOKIES_FILE))
+            cookies_state = await self.context.storage_state(path=str(COOKIES_FILE))
         except Exception as e:
             log.warning("otp_save_cookies_failed", error=str(e))
 
@@ -153,10 +184,10 @@ class OTPLoginSession:
         if not token:
             return {"error": "token_exchange_failed"}
         # single-режим: сохраняем токен глобально (как раньше).
-        # multi-режим: вызывающий берёт token из результата и кладёт в User.
+        # multi-режим: вызывающий берёт token+cookies из результата и кладёт в User.
         _save_token(token)
         log.info("otp_login_success")
-        return {"status": "ok", "token": token}
+        return {"status": "ok", "token": token, "cookies": cookies_state}
 
     async def _exchange(self, code: str) -> dict | None:
         try:

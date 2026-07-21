@@ -14,6 +14,7 @@ from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKe
 from app.config import settings
 from app.database import async_session
 from app.services.payments import build_yoomoney_url, apply_payment
+from app.services import yookassa
 
 log = structlog.get_logger()
 
@@ -27,9 +28,18 @@ async def cb_pay_start(cb: CallbackQuery, **kw):
     lines = [f"💳 <b>Оплата расширенного тарифа</b>\n\n{price}₽ — {days} дней.\n"]
     buttons: list[list[InlineKeyboardButton]] = []
 
-    if settings.yoomoney_wallet:
+    paid_online = False
+    if yookassa.is_configured():
+        url = await yookassa.create_payment(
+            cb.from_user.id, price, "Расширенный тариф авто-откликов")
+        if url:
+            buttons.append([InlineKeyboardButton(text=f"Оплатить {price}₽ картой", url=url)])
+            paid_online = True
+    if not paid_online and settings.yoomoney_wallet:
         url = build_yoomoney_url(cb.from_user.id)
         buttons.append([InlineKeyboardButton(text=f"Оплатить {price}₽ картой (ЮMoney)", url=url)])
+        paid_online = True
+    if paid_online:
         lines.append("После оплаты тариф поднимется автоматически в течение минуты.")
     else:
         lines.append("Онлайн-оплата картой временно недоступна.")
@@ -68,3 +78,34 @@ async def cmd_grant(message: Message, **kw):
             pass
     else:
         await message.answer("Не удалось (пользователь не найден).")
+
+
+@router.message(Command("ai"))
+async def cmd_ai(message: Message, **kw):
+    """Проверить ключи скоринга. Только админ: /ai
+
+    Дёргает каждый эндпоинт пула настоящим запросом — так видно не только
+    «ключ задан», но и что он реально отвечает и не упёрся в лимит.
+    """
+    if str(message.chat.id) != settings.tg_admin_chat_id:
+        return
+    from app.ai.claude import claude_ai
+    pool = claude_ai.score_pool
+    if not pool:
+        await message.answer("AI_SCORE_POOL пуст — скоринг идёт на платном провайдере.")
+        return
+    await message.answer(f"⏳ Проверяю {len(pool)} ключей...")
+    lines = []
+    for ep in pool:
+        host = ep["base_url"].split("//")[-1].split("/")[0]
+        try:
+            text, _, _ = await claude_ai._call_openai_compatible(
+                "Ответь одним числом.", "Сколько будет 2+2? Верни только число.",
+                max_tokens=800, model=ep["model"],
+                base_url=ep["base_url"], api_key=ep["api_key"])
+            got = (text or "").strip()[:20]
+            lines.append(f"✅ {host} ({ep['model']}) → {got or 'пустой ответ'}")
+        except Exception as e:
+            lines.append(f"❌ {host} ({ep['model']}) → {type(e).__name__}: {str(e)[:80]}")
+    await message.answer("🔑 <b>Ключи скоринга</b>\n\n" + "\n".join(lines),
+                         parse_mode="HTML")

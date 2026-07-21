@@ -13,12 +13,13 @@ from __future__ import annotations
 import datetime
 
 import structlog
-from aiogram import Router
+from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery
 
+from app.bot.buttons import BTN_CONNECT, BTN_WHY
 from app.database import async_session
 from app.parsers.hh_login import OTPLoginSession, get_session, set_session, drop_session
 from app.parsers.hh_resume import fetch_resume
@@ -31,7 +32,20 @@ router = Router()
 
 class ConnectSG(StatesGroup):
     phone = State()
+    captcha = State()
     code = State()
+
+
+async def _send_captcha(message: Message):
+    from aiogram.types import FSInputFile
+    from app.parsers.hh_login import CAPTCHA_FILE
+    try:
+        await message.answer_photo(
+            FSInputFile(str(CAPTCHA_FILE)),
+            caption="🔐 hh просит капчу. Введи символы с картинки одним сообщением.\n\nОтмена: /cancel",
+        )
+    except Exception:
+        await message.answer("hh просит капчу, но картинку показать не удалось. Попробуй /connect ещё раз.")
 
 
 async def _is_cancel(message: Message, state: FSMContext) -> bool:
@@ -43,18 +57,75 @@ async def _is_cancel(message: Message, state: FSMContext) -> bool:
     return False
 
 
+CONNECT_PROMPT = (
+    "🔐 <b>Подключение hh.ru — 2 шага, ~1 минута</b>\n\n"
+    "1️⃣ Пришли номер телефона от аккаунта hh "
+    "(например <code>+79991234567</code>).\n"
+    "2️⃣ hh отправит тебе код (в приложение / СМС / почту) — введёшь его здесь.\n\n"
+    "🔒 Пароль <b>не нужен</b> — мы его не спрашиваем. Код приходит <b>тебе</b> от hh, "
+    "бот его не знает. Это безопасно.\n\n"
+    "Отмена: /cancel"
+)
+
+
+async def _start_connect(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(CONNECT_PROMPT, parse_mode="HTML")
+    await state.set_state(ConnectSG.phone)
+
+
 @router.message(Command("connect"))
 async def cmd_connect(message: Message, state: FSMContext, **kw):
-    await state.clear()
+    await _start_connect(message, state)
+
+
+@router.callback_query(F.data == "connect:start")
+async def cb_connect_start(cb: CallbackQuery, state: FSMContext, **kw):
+    await _start_connect(cb.message, state)
+    await cb.answer()
+
+
+@router.message(F.text == BTN_CONNECT)
+async def btn_connect(message: Message, state: FSMContext, **kw):
+    """Нижняя кнопка меню для неподключённых."""
+    await _start_connect(message, state)
+
+
+@router.message(F.text == BTN_WHY)
+async def btn_why(message: Message, state: FSMContext, **kw):
+    await _send_why(message)
+
+
+async def _send_why(message: Message) -> None:
+    """Снимаем главный барьер: «зачем боту мой телефон и что он увидит».
+
+    Половина зашедших не доходит до подключения — упирается ровно сюда.
+    """
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     await message.answer(
-        "🔐 <b>Подключение hh.ru</b>\n\n"
-        "Пришли номер телефона, привязанный к твоему аккаунту hh "
-        "(например <code>+79991234567</code>). hh отправит код тебе на телефон "
-        "или почту — введёшь его здесь. Пароль вводить не нужно.\n\n"
-        "Отмена: /cancel",
+        "🛡 <b>Коротко о безопасности</b>\n\n"
+        "<b>Пароль не спрашиваем.</b> Вход на hh идёт по коду, который hh "
+        "присылает лично тебе. Мы его не знаем и знать не можем.\n\n"
+        "<b>Телефон нужен только hh</b>, чтобы отправить тебе этот код. "
+        "Бот передаёт номер на hh.ru и нигде не публикует.\n\n"
+        "<b>Что бот делает:</b> ищет вакансии, пишет сопроводительные и "
+        "отправляет отклики от твоего имени — то же, что ты делал бы руками.\n\n"
+        "<b>Чего не делает:</b> не меняет резюме, не удаляет отклики, "
+        "не пишет работодателям от себя, не публикует твои данные.\n\n"
+        "<b>Доступ отзывается в любой момент</b> — кнопка «Отключить hh» "
+        "в настройках, либо смени пароль на hh.ru.\n\n"
+        "Код бота открыт: github.com/s1rry/hhautoapply — можно проверить.",
         parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🔗 Понятно, подключить",
+                                 callback_data="connect:start")]]),
     )
-    await state.set_state(ConnectSG.phone)
+
+
+@router.callback_query(F.data == "connect:why")
+async def cb_connect_why(cb: CallbackQuery, state: FSMContext, **kw):
+    await _send_why(cb.message)
+    await cb.answer()
 
 
 @router.message(ConnectSG.phone)
@@ -73,15 +144,36 @@ async def connect_phone(message: Message, state: FSMContext, **kw):
         await state.set_state(ConnectSG.code)
         await message.answer("📩 hh отправил код. Пришли его сюда одним сообщением.")
     elif res.get("status") == "captcha":
-        await sess.cancel()
-        await state.clear()
-        await message.answer(
-            "hh просит капчу — сейчас автоматически не пройти. Попробуй /connect чуть позже."
-        )
+        set_session(message.chat.id, sess)
+        await state.set_state(ConnectSG.captcha)
+        await _send_captcha(message)
     else:
         await sess.cancel()
         await state.clear()
         await message.answer(f"❌ Не удалось начать вход: {res.get('error')}\nПопробуй /connect ещё раз.")
+
+
+@router.message(ConnectSG.captcha)
+async def connect_captcha(message: Message, state: FSMContext, **kw):
+    if await _is_cancel(message, state):
+        return
+    sess = get_session(message.chat.id)
+    if not sess:
+        await state.clear()
+        await message.answer("Сессия входа потеряна. Начни заново: /connect")
+        return
+    await message.answer("⏳ Проверяю капчу...")
+    res = await sess.submit_captcha((message.text or "").strip())
+    if res.get("status") == "code_sent":
+        await state.set_state(ConnectSG.code)
+        await message.answer("✅ Капча принята. hh отправил код — пришли его сюда.")
+    elif res.get("status") == "captcha":
+        await _send_captcha(message)  # не та капча — новая картинка
+    else:
+        await sess.cancel()
+        await drop_session(message.chat.id)
+        await state.clear()
+        await message.answer(f"❌ Не прошло: {res.get('error')}\nПопробуй /connect заново.")
 
 
 @router.message(ConnectSG.code)
@@ -109,30 +201,73 @@ async def connect_code(message: Message, state: FSMContext, **kw):
     ) if token.get("expires_at") else None
 
     # Подтягиваем резюме
-    resume_id, resume_text = await fetch_resume(token["access_token"])
+    resume_id, resume_text, resume_title = await fetch_resume(token["access_token"])
 
+    is_extra = False
     async with async_session() as session:
         user = await get_or_create_user(
             session, message.chat.id, message.from_user.username if message.from_user else None
         )
-        user.hh_access_token = token["access_token"]
-        user.hh_refresh_token = token.get("refresh_token", "")
-        user.hh_token_expires = expires
-        user.hh_connected = True
-        if resume_id:
-            user.hh_resume_id = resume_id
-        if resume_text:
-            user.resume_text = resume_text
-        await session.commit()
+        if user.hh_connected and user.hh_access_token:
+            # Основной уже есть → это дополнительный аккаунт (мультиаккаунт).
+            from app.models.hh_account import HHAccount
+            acc = HHAccount(
+                user_id=user.id,
+                label=(resume_title or (message.from_user.username if message.from_user else None) or "Доп. аккаунт"),
+                hh_access_token=token["access_token"],
+                hh_refresh_token=token.get("refresh_token", ""),
+                hh_token_expires=expires,
+                hh_resume_id=resume_id or None,
+                resume_text=resume_text or None,
+                is_active=True,
+            )
+            session.add(acc)
+            await session.commit()
+            is_extra = True
+        else:
+            import json
+            user.hh_access_token = token["access_token"]
+            user.hh_refresh_token = token.get("refresh_token", "")
+            user.hh_token_expires = expires
+            user.hh_connected = True
+            if res.get("cookies"):
+                user.hh_cookies = json.dumps(res["cookies"])
+            if resume_id:
+                user.hh_resume_id = resume_id
+            if resume_text:
+                user.resume_text = resume_text
+            # Ключевые слова по умолчанию — из заголовка резюме (чтобы не откликаться на всё подряд)
+            st = user.get_settings()
+            if not (st.search_text or "").strip() and resume_title:
+                st.search_text = resume_title
+                user.set_settings(st)
+            await session.commit()
 
-    if resume_id:
+    if is_extra:
         await message.answer(
-            "✅ hh.ru подключён, резюме загружено.\n"
-            "Теперь настрой задачу автоотклика: /task"
+            f"✅ Добавлен ещё один hh-аккаунт{(' — ' + resume_title) if resume_title else ''}.\n"
+            "Автоотклик будет идти и с него (свои лимит и дедуп). "
+            "Список: ⚙️ Настройки → 🔗 Мои аккаунты."
         )
+    elif resume_id:
+        from app.bot.media import send_photo_or_text
+        from app.bot.task_menu import main_reply_kb
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        await state.clear()
+        await send_photo_or_text(
+            message, "apply",
+            "✅ <b>hh.ru подключён, резюме загружено!</b>\n\n"
+            "Остался один шаг — создай задачу, и бот начнёт откликаться сам. Жми 👇",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="➕ Создать задачу автоотклика", callback_data="task:newtask")]]),
+        )
+        await message.answer("Меню бота — кнопки внизу 👇", reply_markup=main_reply_kb())
     else:
+        from app.bot.task_menu import main_reply_kb
+        await state.clear()
         await message.answer(
             "✅ hh.ru подключён.\n"
             "⚠️ Не нашёл активного резюме на hh — создай/опубликуй резюме, "
-            "оно нужно для откликов. Настройки задачи: /task"
+            "оно нужно для откликов. Настройки задачи: /task",
+            reply_markup=main_reply_kb(),
         )

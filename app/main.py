@@ -10,6 +10,7 @@ from aiogram.enums import ParseMode
 from app.config import settings
 from app.database import engine
 from app.models.base import Base
+import app.models  # noqa: F401 — регистрирует все модели в metadata до create_all
 from app.bot.handlers import router, set_scheduler
 from app.workers.scheduler import WorkerScheduler
 
@@ -26,6 +27,72 @@ except ImportError:
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Лёгкая авто-миграция для существующей SQLite-БД: досоздаём новые
+        # колонки users (create_all не делает ALTER для уже созданных таблиц).
+        if settings.database_url.startswith("sqlite"):
+            migrations = {
+                "users": {
+                    "tg_api_id": "BIGINT",
+                    "tg_api_hash": "TEXT",
+                    "tg_session": "TEXT",
+                    "tg_userbot_active": "BOOLEAN DEFAULT 0",
+                "hh_cookies": "TEXT",
+                "connect_reminders": "INTEGER DEFAULT 0",
+                "tier_reminders": "INTEGER DEFAULT 0",
+                },
+                "vacancies": {"account_ref": "VARCHAR(32)", "skip_reason": "VARCHAR(20)",
+                              "search_task_id": "INTEGER"},
+                "applications": {"account_ref": "VARCHAR(32)", "search_task_id": "INTEGER",
+                                 "letter_variant": "VARCHAR(1)"},
+                "search_tasks": {
+                    "resume_id": "VARCHAR(64)",
+                    "resume_title": "VARCHAR(255)",
+                    "resume_text": "TEXT",
+                    "settings_json": "TEXT",
+                    "rec_found": "INTEGER",
+                    "last_run_at": "VARCHAR(32)",
+                    "invites": "INTEGER",
+                    "invites_today": "INTEGER",
+                    "views": "INTEGER",
+                    "views_today": "INTEGER",
+                    "ab_inv_a": "INTEGER",
+                    "ab_inv_b": "INTEGER",
+                },
+            }
+            for table, add in migrations.items():
+                cols = {r[1] for r in (await conn.exec_driver_sql(
+                    f"PRAGMA table_info({table})")).fetchall()}
+                for name, ddl in add.items():
+                    if name not in cols:
+                        await conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+                        log.info("db_migrate_add_column", table=table, column=name)
+            # Привязать историю к основному аккаунту: старые записи с NULL
+            # account_ref принадлежат основному аккаунту "u<user_id>". Иначе
+            # дедуп не узнаёт уже отработанные вакансии и крутит их вхолостую.
+            for table in ("vacancies", "applications"):
+                await conn.exec_driver_sql(
+                    f"UPDATE {table} SET account_ref = 'u' || user_id "
+                    f"WHERE account_ref IS NULL AND user_id IS NOT NULL"
+                )
+            # Бэкфилл skip_reason для старых отсеянных ИИ вакансий — чтобы
+            # новая статистика показала историю, а не только новые прогоны.
+            await conn.exec_driver_sql(
+                "UPDATE vacancies SET skip_reason = 'ai_low' "
+                "WHERE skip_reason IS NULL AND status = 'rejected' "
+                "AND ai_score IS NOT NULL"
+            )
+    # Ограничить доступ к файлу БД (в нём токены/сессии) — только владелец.
+    if settings.database_url.startswith("sqlite"):
+        import os
+        path = settings.database_url.split(":///", 1)[-1]
+        try:
+            if path and os.path.exists(path):
+                os.chmod(path, 0o600)
+        except OSError as e:
+            log.warning("db_chmod_failed", error=str(e))
+    if not settings.encryption_key:
+        log.warning("encryption_key_not_set",
+                    hint="Задай ENCRYPTION_KEY в .env — токены/сессии хранятся без шифрования")
     log.info("database_initialized")
 
 
@@ -77,12 +144,20 @@ async def main():
         from app.bot.hh_connect import router as hh_connect_router
         from app.bot.task_menu import router as task_menu_router
         from app.bot.payments import router as payments_router
+        from app.bot.userbot_connect import router as userbot_router
+        dp.include_router(userbot_router)     # /forwarding — второй ТГ (userbot)
         dp.include_router(task_menu_router)   # /start, /task, настройки
         dp.include_router(payments_router)    # pay:start, /grant
         dp.include_router(hh_connect_router)  # /connect (FSM телефон/код)
 
-        # Вебхук ЮMoney (если настроен кошелёк)
-        if settings.yoomoney_wallet and settings.yoomoney_secret:
+        # Пер-юзерные userbot'ы: пересылка входящих ЛС со второго ТГ.
+        from app.userbot.manager import manager as userbot_manager
+        userbot_manager.bind_bot(bot)
+        asyncio.create_task(userbot_manager.start_all())
+
+        # Вебхук оплаты (если настроен ЮMoney-кошелёк или ЮKassa-магазин)
+        if (settings.yoomoney_wallet and settings.yoomoney_secret) or (
+                settings.yookassa_shop_id and settings.yookassa_secret_key):
             from app.api.payment_webhook import create_payment_app
             pay_app = create_payment_app(bot)
             runner = web.AppRunner(pay_app)
@@ -90,7 +165,10 @@ async def main():
             site = web.TCPSite(runner, "127.0.0.1", settings.payment_webhook_port)
             await site.start()
             log.info("payment_webhook_started", port=settings.payment_webhook_port)
-    dp.include_router(router)
+    else:
+        # Старый одиночный роутер (глобальные /stats, /vacancies, /messages…) —
+        # ТОЛЬКО в single-режиме. В multi он бы показывал данные всех пользователей.
+        dp.include_router(router)
 
     playwright_ok = HAS_PLAYWRIGHT
     if playwright_ok:
@@ -104,7 +182,8 @@ async def main():
         log.info("playwright_not_available", mode="api_only")
 
     scheduler = WorkerScheduler(
-        notify_callback=lambda text: notify_telegram(bot, text)
+        notify_callback=lambda text: notify_telegram(bot, text),
+        bot=bot,
     )
     set_scheduler(scheduler)
     scheduler.start()
@@ -149,18 +228,15 @@ async def main():
         except Exception as e:
             log.warning("tg_userbot_init_failed", error=str(e))
 
-    # Run userbot init in background so it doesn't block aiogram polling
-    asyncio.create_task(_start_userbot_bg())
+    # Старый глобальный userbot (один общий аккаунт из .env) — только для
+    # single-режима. В multi его заменяет пер-юзерный UserBotManager, иначе
+    # один входящий ЛС уходил бы дважды и два клиента делили бы сессию.
+    if settings.mode != "multi":
+        asyncio.create_task(_start_userbot_bg())
 
-    await notify_telegram(
-        bot,
-        "🚀 <b>Job Hunter запущен!</b>\n\n"
-        f"Позиция: {settings.desired_position}\n"
-        f"Зарплата: {settings.desired_salary_min:,}–{settings.desired_salary_max:,}\n"
-        f"Интервал: {settings.check_interval_sec // 60} мин\n"
-        f"Лимит: {settings.max_applies_per_day} откликов/день\n"
-        f"Режим: {'Playwright' if playwright_ok else 'API-only'}",
-    )
+    # Тихий старт: без спама-карточкой при каждом рестарте (только в лог).
+    log.info("service_started", mode=settings.mode,
+             engine="playwright" if playwright_ok else "api_only")
 
     # Wait for proxy connectivity before starting polling
     if settings.tg_proxy:

@@ -14,13 +14,24 @@ from app.workers.message_worker import check_all_messages
 
 log = structlog.get_logger()
 
+
+def _tier_free_limit() -> int:
+    from app.bot.task_menu import FREE_DAILY_LIMIT
+    return FREE_DAILY_LIMIT
+
+
+def _tier_paid_limit() -> int:
+    from app.bot.task_menu import PAID_DAILY_LIMIT
+    return PAID_DAILY_LIMIT
+
 MSK = ZoneInfo("Europe/Moscow")
 STATE_FILE = Path("data/scheduler_state.json")
 
 
 class WorkerScheduler:
-    def __init__(self, notify_callback=None):
+    def __init__(self, notify_callback=None, bot=None):
         self.scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
+        self.bot = bot  # для персональных уведомлений (дайджест)
         # Load persisted state
         state = self._load_state()
         self.is_paused = state.get("is_paused", False)
@@ -98,8 +109,234 @@ class WorkerScheduler:
             except Exception as e:
                 log.error("user_cycle_failed", user_id=uid, error=str(e))
 
+    async def _job_bump_users(self):
+        """Мультиюзер: поднять резюме там, где включено «Поднятие» — учитываем
+        per-task настройки (у каждой задачи своё резюме) + старый глобальный флаг."""
+        from sqlalchemy import select
+        from app.database import async_session
+        from app.models.user import User
+        from app.models.search_task import SearchTask
+        from app.parsers.hh_user_client import HHUserClient
+        from datetime import datetime as _dt, timezone as _tz
+
+        plan = []  # (uid, at, rt, exp, {resume_id, ...})
+        async with async_session() as session:
+            users = (await session.execute(
+                select(User).where(User.is_active.is_(True), User.hh_connected.is_(True))
+            )).scalars().all()
+            for u in users:
+                if not u.hh_access_token:
+                    continue
+                resume_ids = set()
+                if u.get_settings().resume_bump and u.hh_resume_id:
+                    resume_ids.add(u.hh_resume_id)
+                tasks = (await session.execute(
+                    select(SearchTask).where(SearchTask.user_id == u.id, SearchTask.is_active.is_(True))
+                )).scalars().all()
+                for t in tasks:
+                    s = t.get_settings() if t.settings_json else u.get_settings()
+                    if getattr(s, "resume_bump", False):
+                        rid = t.resume_id or u.hh_resume_id
+                        if rid:
+                            resume_ids.add(rid)
+                if resume_ids:
+                    plan.append((u.id, u.hh_access_token, u.hh_refresh_token or "",
+                                 u.hh_token_expires.timestamp() if u.hh_token_expires else 0.0,
+                                 resume_ids))
+        for uid, at, rt, exp, resume_ids in plan:
+            for rid in resume_ids:
+                try:
+                    client = HHUserClient(at, rt, rid, exp)
+                    ok = await client.bump_resume()
+                    if client.new_token:
+                        at, rt = client.new_token["access_token"], client.new_token["refresh_token"]
+                        exp = client.new_token["expires_at"]
+                        async with async_session() as session:
+                            u = await session.get(User, uid)
+                            if u:
+                                u.hh_access_token = at
+                                u.hh_refresh_token = rt
+                                u.hh_token_expires = _dt.fromtimestamp(exp, tz=_tz.utc)
+                                await session.commit()
+                    log.info("resume_bumped", user_id=uid, resume=rid, ok=ok)
+                except Exception as e:
+                    log.warning("resume_bump_failed", user_id=uid, error=str(e))
+
+    async def _job_daily_digest(self):
+        """Вечерний дайджест (20:00 МСК): отправлено / приглашения / просмотры за день."""
+        from sqlalchemy import select, func
+        from app.database import async_session
+        from app.models.user import User
+        from app.models.search_task import SearchTask
+        from app.models.application import Application, ApplicationStatus
+        if not self.bot:
+            return
+        async with async_session() as session:
+            users = (await session.execute(
+                select(User).where(User.is_active.is_(True), User.hh_connected.is_(True))
+            )).scalars().all()
+            for u in users:
+                tasks = (await session.execute(
+                    select(SearchTask).where(SearchTask.user_id == u.id).order_by(SearchTask.id)
+                )).scalars().all()
+                if not tasks:
+                    continue
+                sent_sum = inv_sum = views_sum = 0
+                task_lines = []
+                for t in tasks:
+                    sent_today = (await session.execute(
+                        select(func.count(Application.id)).where(
+                            Application.search_task_id == t.id,
+                            Application.status == ApplicationStatus.SENT,
+                            func.date(Application.created_at) == func.current_date())
+                    )).scalar() or 0
+                    inv_t, vt = (t.invites_today or 0), (t.views_today or 0)
+                    sent_sum += sent_today
+                    inv_sum += inv_t
+                    views_sum += vt
+                    task_lines.append(f"• {t.keyword[:30]} — {sent_today} откл., {inv_t} пригл.")
+                if sent_sum == 0 and inv_sum == 0 and views_sum == 0:
+                    continue  # активности за день нет — не беспокоим
+                text = (
+                    "🌙 <b>Итоги дня</b>\n\n"
+                    f"📤 Отправлено откликов: <b>{sent_sum}</b>\n"
+                    f"📨 Приглашений: <b>{inv_sum}</b>\n"
+                    f"👀 Просмотров резюме: <b>{views_sum}</b>\n\n"
+                    "<b>По задачам:</b>\n" + "\n".join(task_lines)
+                )
+                try:
+                    await self.bot.send_message(u.telegram_id, text, parse_mode="HTML")
+                except Exception as e:
+                    log.warning("digest_send_failed", user_id=u.id, error=str(e))
+
+    async def _job_connect_reminders(self):
+        """Ре-энгейджмент: тем, кто зарегался, но не подключил hh — напомнить.
+        До 2 напоминаний: через ~3ч и через ~24ч после регистрации."""
+        from sqlalchemy import select
+        from datetime import datetime as _dt, timezone as _tz
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        from app.database import async_session
+        from app.models.user import User
+        if not self.bot:
+            return
+        now = _dt.now(_tz.utc)
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🔗 Подключить hh.ru за 1 минуту", callback_data="connect:start")],
+            [InlineKeyboardButton(text="🛡 А это безопасно?", callback_data="connect:why")]])
+        async with async_session() as session:
+            users = (await session.execute(
+                select(User).where(User.hh_connected.is_(False), User.connect_reminders < 3)
+            )).scalars().all()
+            for u in users:
+                created = u.created_at
+                if created is None:
+                    continue
+                if created.tzinfo is None:  # SQLite отдаёт naive — трактуем как UTC
+                    created = created.replace(tzinfo=_tz.utc)
+                age_h = (now - created).total_seconds() / 3600
+                send = False
+                if u.connect_reminders == 0 and age_h >= 3:
+                    text = ("👋 Остался <b>один шаг</b>!\n\n"
+                            "Ты зашёл в бот автооткликов, но не подключил hh.ru — без этого "
+                            "бот не может откликаться за тебя. Это займёт минуту, пароль не нужен. Жми 👇")
+                    send = True
+                elif u.connect_reminders == 1 and age_h >= 24:
+                    text = ("🔔 Напоминаем: подключи hh.ru — и бот начнёт откликаться на вакансии "
+                            "сам, 24/7. Минута, без пароля. Жми 👇")
+                    send = True
+                # Третье касание — про результат, а не про подключение: к этому
+                # моменту абстрактное «подключи» человека уже не цепляет.
+                elif u.connect_reminders == 2 and age_h >= 72:
+                    text = ("📊 Пока ты думаешь, бот у других отправляет по "
+                            "<b>200 откликов в день</b> — столько руками не осилить.\n\n"
+                            "Подключение занимает минуту и пароль не нужен. "
+                            "Не понравится — отключишь одной кнопкой. Жми 👇")
+                    send = True
+                if send:
+                    try:
+                        await self.bot.send_message(u.telegram_id, text, reply_markup=kb, parse_mode="HTML")
+                        u.connect_reminders += 1
+                    except Exception as e:
+                        log.warning("connect_reminder_failed", user_id=u.id, error=str(e))
+                        u.connect_reminders += 1  # не долбить недоступных
+            await session.commit()
+
+    async def _job_tier_expiry(self):
+        """Конец доступа близко — показать результат и предложить продлить.
+
+        Два напоминания: за 3 дня и за 1 день. Считаем личную статистику за
+        всё время: цифры собственных откликов и приглашений убеждают сильнее
+        любого описания тарифа.
+        """
+        from sqlalchemy import select, func
+        from datetime import datetime as _dt, timezone as _tz
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        from app.database import async_session
+        from app.models.user import User
+        from app.models.application import Application, ApplicationStatus
+        from app.models.search_task import SearchTask
+        from app.config import settings as _s
+        if not self.bot:
+            return
+        now = _dt.now(_tz.utc)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"💎 Продлить за {_s.subscription_price}₽",
+                                  callback_data="pay:start")],
+            [InlineKeyboardButton(text="Что входит в тариф", callback_data="task:tariff")],
+        ])
+        async with async_session() as session:
+            users = (await session.execute(
+                select(User).where(User.tier == "paid", User.tier_until.is_not(None),
+                                   User.tier_reminders < 2)
+            )).scalars().all()
+            for u in users:
+                until = u.tier_until
+                if until is None:
+                    continue
+                if until.tzinfo is None:  # SQLite отдаёт naive — трактуем как UTC
+                    until = until.replace(tzinfo=_tz.utc)
+                days_left = (until - now).total_seconds() / 86400
+                stage = None
+                if u.tier_reminders == 0 and days_left <= 3:
+                    stage = 3
+                elif u.tier_reminders == 1 and days_left <= 1:
+                    stage = 1
+                if stage is None:
+                    continue
+
+                sent = (await session.execute(
+                    select(func.count(Application.id)).where(
+                        Application.user_id == u.id,
+                        Application.status == ApplicationStatus.SENT)
+                )).scalar() or 0
+                invites = (await session.execute(
+                    select(func.coalesce(func.sum(SearchTask.invites), 0)).where(
+                        SearchTask.user_id == u.id)
+                )).scalar() or 0
+
+                if sent:
+                    stats = (f"За это время бот отправил за тебя <b>{sent}</b> откликов"
+                             + (f" и принёс <b>{invites}</b> приглашений" if invites else "")
+                             + ".\n\n")
+                else:
+                    stats = ""
+                when = "через 3 дня" if stage == 3 else "завтра"
+                free = _tier_free_limit()
+                text = (f"⏳ <b>Полный доступ заканчивается {when}</b>\n\n"
+                        f"{stats}"
+                        f"После этого останется бесплатный тариф — до {free} откликов в день "
+                        f"вместо {_tier_paid_limit()}, без рекомендаций hh и нескольких аккаунтов.\n\n"
+                        f"Продлить — {_s.subscription_price}₽ в месяц 👇")
+                try:
+                    await self.bot.send_message(u.telegram_id, text, reply_markup=kb,
+                                                parse_mode="HTML")
+                except Exception as e:
+                    log.warning("tier_reminder_failed", user_id=u.id, error=str(e))
+                u.tier_reminders += 1  # и при ошибке — не долбить недоступных
+            await session.commit()
+
     def _start_multi(self, interval: int):
-        """Планировщик мультиюзерного режима: один общий цикл по пользователям."""
+        """Планировщик мультиюзерного режима: цикл откликов + поднятие резюме."""
         from datetime import datetime, timedelta
         self.scheduler.add_job(
             self._job_all_users,
@@ -111,6 +348,55 @@ class WorkerScheduler:
             max_instances=1,
             misfire_grace_time=60,
             next_run_time=datetime.now(MSK) + timedelta(seconds=30),
+        )
+        self.scheduler.add_job(
+            self._job_bump_users,
+            "interval",
+            hours=4,
+            id="multi_bump",
+            name="Поднятие резюме (мультиюзер)",
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=120,
+            next_run_time=datetime.now(MSK) + timedelta(minutes=3),
+        )
+        # Ре-энгейджмент неподключённых — каждые 2 часа.
+        from datetime import datetime as _dt2, timedelta as _td2
+        self.scheduler.add_job(
+            self._job_connect_reminders,
+            "interval",
+            hours=2,
+            id="connect_reminders",
+            name="Напоминания подключить hh",
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=600,
+            next_run_time=_dt2.now(MSK) + _td2(minutes=5),
+        )
+        # Вечерний дайджест — каждый день в 20:00 МСК.
+        self.scheduler.add_job(
+            self._job_daily_digest,
+            "cron",
+            hour=20,
+            minute=0,
+            id="daily_digest",
+            name="Дайджест дня",
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=3600,
+        )
+        # Напоминания об окончании тарифа — раз в день в 12:00 МСК.
+        # Днём, а не ночью: сообщение с оплатой должно попасть в активные часы.
+        self.scheduler.add_job(
+            self._job_tier_expiry,
+            "cron",
+            hour=12,
+            minute=0,
+            id="tier_expiry",
+            name="Напоминания об окончании тарифа",
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=3600,
         )
         self.scheduler.start()
         log.info("scheduler_started_multi", interval=interval)
