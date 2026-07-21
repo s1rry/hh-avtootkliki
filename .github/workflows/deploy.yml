@@ -1,0 +1,45 @@
+name: Deploy to VPS
+
+# Автодеплой: при пуше в main код едет на сервер и бот перезапускается.
+# Секреты (SSH-ключ, хост) хранятся в GitHub Secrets — в публичном репо не видны.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:        # можно запустить вручную из вкладки Actions
+
+concurrency:                # два пуша подряд не деплоятся внахлёст
+  group: deploy-vps
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -p "${{ secrets.DEPLOY_PORT || '22' }}" -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Rsync code (без .env, .venv, data)
+        run: |
+          rsync -avz \
+            -e "ssh -i ~/.ssh/id_deploy -p ${{ secrets.DEPLOY_PORT || '22' }}" \
+            --exclude '.env' \
+            --exclude '.venv/' \
+            --exclude 'data/' \
+            --exclude '__pycache__/' \
+            --exclude '.git/' \
+            app/ "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/app/"
+
+      - name: Install deps & restart bot
+        run: |
+          ssh -i ~/.ssh/id_deploy -p "${{ secrets.DEPLOY_PORT || '22' }}" \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "cd ${{ secrets.DEPLOY_PATH }} && \
+             ./.venv/bin/pip install -q -r requirements.txt 2>/dev/null || true; \
+             systemctl restart hhautoapply && sleep 4 && systemctl is-active hhautoapply"
