@@ -18,3 +18,5 @@ kod.pub
 *.pem
 id_ed25519*
 id_rsa*
+deploy_ci
+deploy_ci.pub
