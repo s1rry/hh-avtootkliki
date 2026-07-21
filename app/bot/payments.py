@@ -109,3 +109,59 @@ async def cmd_ai(message: Message, **kw):
             lines.append(f"❌ {host} ({ep['model']}) → {type(e).__name__}: {str(e)[:80]}")
     await message.answer("🔑 <b>Ключи скоринга</b>\n\n" + "\n".join(lines),
                          parse_mode="HTML")
+
+
+@router.message(Command("clients"))
+async def cmd_clients(message: Message, **kw):
+    """Сводка по клиентам: тариф, срок пробного, активность. Только админ."""
+    if str(message.chat.id) != settings.tg_admin_chat_id:
+        return
+    import datetime as _dt
+    from sqlalchemy import select, func
+    from app.models.user import User
+    from app.models.application import Application, ApplicationStatus
+    from app.models.search_task import SearchTask
+
+    now = _dt.datetime.now(_dt.timezone.utc)
+    async with async_session() as session:
+        users = (await session.execute(select(User).order_by(User.id))).scalars().all()
+        # Отклики всего и за сегодня — одним запросом на всех, потом разложим.
+        sent_total = dict((uid, n) for uid, n in (await session.execute(
+            select(Application.user_id, func.count(Application.id))
+            .where(Application.status == ApplicationStatus.SENT)
+            .group_by(Application.user_id))).all())
+        sent_today = dict((uid, n) for uid, n in (await session.execute(
+            select(Application.user_id, func.count(Application.id))
+            .where(Application.status == ApplicationStatus.SENT,
+                   func.date(Application.created_at) == func.current_date())
+            .group_by(Application.user_id))).all())
+        invites = dict((uid, n or 0) for uid, n in (await session.execute(
+            select(SearchTask.user_id, func.sum(func.coalesce(SearchTask.invites, 0)))
+            .group_by(SearchTask.user_id))).all())
+
+    total = len(users)
+    paid = sum(1 for u in users if u.tier == "paid")
+    connected = sum(1 for u in users if u.hh_connected)
+    lines = [f"👥 <b>Клиенты: {total}</b>  •  💎 платных/пробных: {paid}  •  🔗 подключили hh: {connected}\n"]
+    for u in users:
+        # Срок доступа
+        if u.tier == "paid" and u.tier_until:
+            tu = u.tier_until
+            if tu.tzinfo is None:
+                tu = tu.replace(tzinfo=_dt.timezone.utc)
+            days = (tu - now).days
+            access = f"💎 ещё {days}д" if days >= 0 else "💎 истёк"
+        else:
+            access = "🆓 free"
+        hh = "🔗" if u.hh_connected else "➖"
+        uname = f"@{u.username}" if u.username else f"id{u.telegram_id}"
+        st = sent_today.get(u.id, 0)
+        tot = sent_total.get(u.id, 0)
+        inv = invites.get(u.id, 0)
+        lines.append(f"{hh} <b>{uname}</b> · {access} · сегодня {st}, всего {tot}, пригл. {inv}")
+
+    text = "\n".join(lines)
+    # Телеграм режет длинные сообщения — бьём на части по 3500 символов.
+    while text:
+        await message.answer(text[:3500], parse_mode="HTML")
+        text = text[3500:]
