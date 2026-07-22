@@ -19,6 +19,18 @@ import re
 
 from pydantic import BaseModel, Field
 
+# Кириллические буквы, визуально совпадающие с латинскими → латиница.
+# Нужно, чтобы фильтр "1С" (кир) ловил "1C" (лат) и наоборот.
+_HOMOGLYPHS = str.maketrans({
+    "а": "a", "с": "c", "е": "e", "о": "o", "р": "p", "х": "x", "у": "y",
+    "к": "k", "м": "m", "т": "t", "н": "h", "в": "b",
+})
+
+
+def norm_homoglyphs(s: str) -> str:
+    """Привести к нижнему регистру и заменить кириллические гомоглифы латиницей."""
+    return s.lower().translate(_HOMOGLYPHS)
+
 
 class UserSettings(BaseModel):
     # --- Поиск ---
@@ -112,15 +124,18 @@ class UserSettings(BaseModel):
         return [p.strip() for p in re.split(r"[,/\n]+", raw) if p.strip()]
 
     def excluded_words(self) -> list[str]:
-        """Слова-исключения (через запятую/слэш/перенос) в нижнем регистре.
+        """Слова-исключения (через запятую/слэш/перенос), нормализованные.
 
         Фильтруем на своей стороне: hh не понимает список исключений (запятую
         трактует как фразу), поэтому отсев делаем сами по названию/описанию.
+        Нормализуем гомоглифы: "1С" (кириллица) и "1C" (латиница) для человека
+        одно и то же, но по кодам разные — без нормализации фильтр "1С" не
+        отсеивает вакансию "1C:ERP".
         """
-        raw = (self.excluded_text or "").strip().lower()
+        raw = (self.excluded_text or "").strip()
         if not raw:
             return []
-        return [w.strip() for w in re.split(r"[,/\n]+", raw) if w.strip()]
+        return [norm_homoglyphs(w.strip()) for w in re.split(r"[,/\n]+", raw) if w.strip()]
 
     def to_hh_params(self) -> dict:
         """Параметры поиска hh /vacancies БЕЗ text — фразу подставляет движок."""

@@ -23,6 +23,7 @@ from app.models.application import Application, ApplicationStatus
 from app.ai.claude import claude_ai
 from app.parsers.hh_user_client import HHUserClient
 from app.parsers.letter_template import render_letter
+from app.models.user_settings import norm_homoglyphs
 from app.utils.anti_detect import random_delay
 
 log = structlog.get_logger()
@@ -483,10 +484,11 @@ async def run_account_cycle(user_id: int, ctx: dict, tasks: list[dict]) -> int:
                     continue
 
                 # Слова-исключения: отсеиваем по названию + сниппету (на своей стороне).
+                # Нормализуем гомоглифы, чтобы "1С"(кир) ловил "1C:ERP"(лат).
                 if excluded:
                     snip = item.get("snippet") or {}
-                    blob = " ".join(str(x) for x in (
-                        title, snip.get("responsibility"), snip.get("requirement")) if x).lower()
+                    blob = norm_homoglyphs(" ".join(str(x) for x in (
+                        title, snip.get("responsibility"), snip.get("requirement")) if x))
                     if any(w in blob for w in excluded):
                         continue
 
