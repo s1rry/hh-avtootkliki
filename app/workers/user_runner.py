@@ -300,8 +300,9 @@ async def run_user_cycle(user_id: int) -> int:
             log.info("user_no_keywords_skip", user_id=user.id)
             return 0
         contexts = await _account_contexts(session, user)
-        # Письма: платным — основная модель, бесплатным — подешевле.
-        letter_model = None if user.is_paid else (settings.ai_letter_model_free or None)
+        # Письма всем на Haiku: качество письма определяет промпт, не модель,
+        # а Haiku в разы дешевле. ai_letter_model — общий тумблер модели писем.
+        letter_model = settings.ai_letter_model or "claude-haiku-4-5"
 
     total = 0
     for ctx in contexts:
