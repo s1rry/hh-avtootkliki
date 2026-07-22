@@ -244,13 +244,40 @@ class ClaudeAI:
 Описание:
 {vacancy_description}"""
 
-        # Умеренно повышенная температура: письма к разным вакансиям должны
-        # отличаться, но 0.9 давал грамматические сбои (сбитые местоимения).
-        # Разнообразие в основном обеспечивает промпт («начинай по-разному»).
-        text, inp_tok, out_tok = await self._call(system, user_msg, max_tokens=700,
-                                                  model=model, temperature=0.7)
-        log.info("ai_cover_letter_generated", title=vacancy_title[:60], model=model or "default")
-        return self._humanize(text.strip()), inp_tok, out_tok
+        # Письма гоняем через тот же бесплатный пул, что и скоринг (Mistral и
+        # др. пишут по-русски не хуже Haiku — проверено). Пул недоступен —
+        # откат на платную модель писем. Температура 0.7: разнообразие даёт
+        # промпт, а 0.9 давал грамматические сбои.
+        text, inp_tok, out_tok = await self._pooled_call(
+            system, user_msg, max_tokens=700, temperature=0.7, fallback_model=model)
+        log.info("ai_cover_letter_generated", title=vacancy_title[:60])
+        return self._humanize((text or "").strip()), inp_tok, out_tok
+
+    async def _pooled_call(self, system: str, user_msg: str, max_tokens: int,
+                           temperature: float, fallback_model: str | None
+                           ) -> tuple[str, int, int]:
+        """Запрос через бесплатный пул с ротацией и кулдауном, как в скоринге.
+        Все бесплатные легли — уходим на платную модель, чтобы письмо не пропало.
+        """
+        import time as _t
+        now = _t.time()
+        for i in range(len(self.score_pool)):
+            ep = self.score_pool[(self._pool_idx + i) % len(self.score_pool)]
+            if self._cooldown.get(ep["base_url"], 0) > now:
+                continue
+            try:
+                out = await self._call_openai_compatible(
+                    system, user_msg, max_tokens=max_tokens, model=ep["model"],
+                    base_url=ep["base_url"], api_key=ep["api_key"], temperature=temperature)
+                self._pool_idx = (self._pool_idx + i + 1) % len(self.score_pool)
+                self._cooldown.pop(ep["base_url"], None)
+                if out[0].strip():          # пустой ответ — пробуем следующий
+                    return out
+            except Exception:
+                self._cooldown[ep["base_url"]] = now + POOL_COOLDOWN_SEC
+        # Пул не дал результата — платный фолбэк.
+        return await self._call(system, user_msg, max_tokens=max_tokens,
+                                model=fallback_model, temperature=temperature)
 
     @staticmethod
     def _humanize(text: str) -> str:
