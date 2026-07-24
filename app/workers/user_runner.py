@@ -29,7 +29,11 @@ from app.utils.anti_detect import random_delay
 
 log = structlog.get_logger()
 
-_REFUSAL = ("не могу", "as an ai", "извините", "не имею возможности")
+# Признаки, что ИИ отказался писать (а не написал письмо). Проверяем ТОЛЬКО
+# начало ответа: "не могу" в середине живого письма ("не могу не отметить") —
+# нормально, а раньше оно ошибочно браковало хорошее письмо в мусорный шаблон.
+_REFUSAL = ("как ии", "as an ai", "я не могу", "не имею возможности",
+            "к сожалению, я не", "извините, но я")
 
 # Потолок ИИ-оценок за один цикл на пользователя — защита от лишних трат/латентности
 # при широком поиске (умный отбор делает отдельный ИИ-запрос на каждую вакансию).
@@ -88,8 +92,9 @@ async def _build_letter(item: dict, title: str, st, resume_text: str,
                 custom_prompt=(st.ai_custom_prompt or None), model=model
             )
             text = (text or "").strip()
-            low = text.lower()
-            if text and len(text) >= 40 and not any(m in low for m in _REFUSAL):
+            # Отказ ищем только в начале ответа, не по всему тексту.
+            head = text[:80].lower()
+            if text and len(text) >= 40 and not any(m in head for m in _REFUSAL):
                 if contact:
                     # Поле контакта задано — оно единственный источник. Убираем
                     # строку "Контакты:", которую ИИ добавил из резюме, чтобы не
